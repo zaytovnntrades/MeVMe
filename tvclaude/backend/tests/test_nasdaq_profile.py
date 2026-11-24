@@ -181,7 +181,7 @@ class TestPineScripts:
         fvg_bounds = {"low", "high"}
         return set(TradingViewAlert.model_fields) | set(Structure.model_fields) | indicators | fvg_bounds
 
-    @pytest.mark.parametrize("script", ["nq_claude_alert.pine", "nq_bullish_strategy.pine"])
+    @pytest.mark.parametrize("script", ["nq_claude_alert.pine", "nq_bullish_strategy.pine", "nq_bearish_strategy.pine"])
     def test_script_keys_are_accepted_by_the_schema(self, script):
         import re
         keys = set(re.findall(r'"([a-z_0-9]+)":', (self.ROOT / script).read_text()))
@@ -195,3 +195,23 @@ class TestPineScripts:
         assert r.status_code == 202, r.text
         wait_for(c, r.json()["alert_id"])
         assert "long 12" in fake.calls[0]["context"]["notes"]
+
+    def test_bearish_strategy_alert_accepted_and_analysed(self, make_client):
+        short = dict(symbol="MNQ1!", market_bias="BEARISH", decision="SHORT_SETUP", entry_zone=[21000.0, 21002.0],
+                     stop_loss=21010.0, take_profit=[20980.0, 20970.0, 20950.0])   # worst fill 21000, R = 10: 2R / 3R / 5R
+        fake = FakeAnalyst(make_analysis(**short))
+        c = make_client(analyst=fake, **PROFILE)
+        r = c.post("/webhook/tradingview", content=json.dumps(payload("pine_bearish_strategy")))
+        assert r.status_code == 202, r.text
+        an = wait_for(c, r.json()["alert_id"])["analyses"][-1]
+        assert "short 12" in fake.calls[0]["context"]["notes"]
+        assert an["decision"] == "SHORT_SETUP" and an["risk"]["side"] == "short"
+        assert an["risk"]["reward_risk"] == [2.0, 3.0, 5.0] and an["risk"]["contracts"] == {"NQ": 1, "MNQ": 2}
+
+    def test_long_and_short_scripts_mirror_each_other(self):
+        bull = (self.ROOT / "nq_bullish_strategy.pine").read_text()
+        bear = (self.ROOT / "nq_bearish_strategy.pine").read_text()
+        for long_only in ("strategy.long", "close + tp1R", "low - bufTicks", "ta.crossover", "position_size > 0"):
+            assert long_only not in bear, long_only
+        for short_only in ("strategy.short", "close - tp1R", "high + bufTicks", "ta.crossunder", "position_size < 0"):
+            assert short_only in bear and short_only not in bull, short_only

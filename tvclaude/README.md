@@ -75,6 +75,13 @@ TradingView only sends webhooks to public HTTPS URLs on port 80 or 443. Put the 
 - sizes to $250 using the symbol's own $ per point, and exits in thirds at 2R/3R/5R with breakeven after TP1
 - stops for the day after 2 losses, and flattens at 15:55 ET
 
+**Bearish strategy:** `tradingview/nq_bearish_strategy.pine` is the exact mirror for shorts:
+- 15m bias below VWAP with EMA 21 < EMA 50
+- a sweep of the last swing high, or a close below the last swing low, under VWAP with EMA 9 < 21
+- a stop 2 ticks above the trigger high, at least 2R of room to the nearest support (swing low or prior-day low), and targets in thirds below
+
+**Running both:** each script counts its own 2-loss daily stop, so together they could lose 4 × $250 = $1,000 in a day, the whole drawdown. Halve "Max full losses per day" to 1 in each when they run together. The tvclaude backend's drawdown check covers alerts from both either way.
+
 Its Strategy Tester results are history, not a forecast. Set your real per-contract commission in Properties first. With "alert() function calls only", each entry sends a tvclaude alert carrying the plan in `notes`.
 
 The secret goes in the JSON body because TradingView can't set headers. The server strips it before storing anything. `tests/payloads/pine_template_nq.json` shows the exact shape the script emits.
@@ -122,7 +129,7 @@ The secret goes in the JSON body because TradingView can't set headers. The serv
 ## Tests
 
 ```bash
-cd backend && .venv/bin/python -m pytest -q        # 134 tests, offline, no API cost
+cd backend && .venv/bin/python -m pytest -q        # 137 tests, offline, no API cost
 RUN_LIVE_CLAUDE_TESTS=1 ANTHROPIC_API_KEY=... .venv/bin/python -m pytest -q -k live   # one real Claude call
 ```
 
