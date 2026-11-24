@@ -13,14 +13,14 @@ from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 from sqlalchemy import func, select
 
-from . import account, classify, strategies
+from . import account, classify, shield, strategies
 from .analyst import ClaudeAnalyst
 from .config import Settings, get_settings
 from .db import Alert, Analysis, Database, JournalEntry, utcnow
-from .infra import Deduper, Hub, MemoryQueue, RateLimiter, RedisQueue, Telegram
+from .infra import Deduper, Discord, Hub, MemoryQueue, Notifier, RateLimiter, RedisQueue, Telegram
 from .pipeline import Services, side_for, worker
 from .risk import ContractSpecs, RiskInputs, RiskManager, futures_root
-from .schemas import (AssetClass, JournalCreate, JournalUpdate, RiskRequest, TradingViewAlert,
+from .schemas import (AssetClass, HaltRequest, JournalCreate, JournalUpdate, RiskRequest, TradingViewAlert,
                       WebhookAck)
 from .serialize import alert_dict, analysis_dict, journal_dict
 
@@ -30,7 +30,7 @@ log = logging.getLogger("tvclaude")
 
 
 def create_app(settings: Settings | None = None, analyst=None, telegram: Telegram | None = None,
-               start_workers: bool = True) -> FastAPI:
+               discord: Discord | None = None, start_workers: bool = True, clock=None) -> FastAPI:
     settings = settings or get_settings()
     db = Database(settings.database_url)
 
@@ -50,7 +50,9 @@ def create_app(settings: Settings | None = None, analyst=None, telegram: Telegra
                              settings.min_reward_risk, settings.rr_target_index, settings.max_target_r,
                              settings.allowed_futures_roots),
             queue=RedisQueue(redis) if redis else MemoryQueue(),
-            hub=Hub(), telegram=telegram or Telegram(settings.telegram_bot_token, settings.telegram_chat_id))
+            hub=Hub(), clock=clock,
+            notifier=Notifier(telegram or Telegram(settings.telegram_bot_token, settings.telegram_chat_id),
+                              discord or Discord(settings.discord_webhook_url)))
         app.state.svc = svc
         app.state.limiter = RateLimiter(settings.rate_limit_per_minute, redis)
         app.state.dedup = Deduper(60, redis)
@@ -172,7 +174,9 @@ def create_app(settings: Settings | None = None, analyst=None, telegram: Telegra
             "database": "ok" if await asyncio.to_thread(s.db.ping) else "error", "redis": redis_state,
             "anthropic": {"model": settings.anthropic_model, "effort": settings.analysis_effort,
                           "api_key_set": bool(settings.anthropic_api_key or os.environ.get("ANTHROPIC_API_KEY"))},
-            "telegram": "configured" if s.telegram.enabled else "off",
+            "telegram": s.notifier.status().get("telegram", "off"),
+            "discord": s.notifier.status().get("discord", "off"),
+            "shield": await asyncio.to_thread(shield_state),
             "queue_depth": await s.queue.depth(),
             "workers_running": sum(1 for t in app.state.workers if not t.done()),
             "account": (await asyncio.to_thread(account_state)).to_dict(),
@@ -223,7 +227,46 @@ def create_app(settings: Settings | None = None, analyst=None, telegram: Telegra
         return await asyncio.to_thread(q)
 
     def account_state():
-        return account.load(svc().db, settings.account_balance, settings.drawdown_limit, settings.drawdown_mode)
+        return svc().account_state()
+
+    def shield_state() -> dict:
+        s = svc()
+        halt = shield.get_halt(s.db)
+        acct = s.account_state()
+        blocks = shield.precheck(now=s.now(), halted=halt.halted, halt_reason=halt.reason, acct=acct,
+                                 risk_per_trade=s.risk_per_trade(), entry_window=settings.entry_window,
+                                 daily_loss_limit=settings.daily_loss_limit,
+                                 max_consecutive_losses=settings.max_consecutive_losses)
+        warnings = []
+        if settings.account_phase == "funded" and settings.drawdown_mode == "eod_trailing":
+            warnings.append("funded accounts may use an INTRADAY trailing drawdown that counts open profit: "
+                            "confirm your firm's funded rule before relying on eod_trailing")
+        return {"halted": halt.halted, "halt_reason": halt.reason, "phase": settings.account_phase,
+                "entry_window": settings.entry_window, "daily_loss_limit": settings.daily_loss_limit,
+                "max_consecutive_losses": settings.max_consecutive_losses,
+                "new_setups_allowed_now": not blocks, "would_block": [b.reason for b in blocks],
+                "warnings": warnings}
+
+    @app.get("/api/shield", dependencies=[Depends(require_dashboard)])
+    async def get_shield():
+        return await asyncio.to_thread(shield_state)
+
+    @app.post("/api/shield/halt", dependencies=[Depends(require_dashboard)])
+    async def halt(body: HaltRequest):
+        await asyncio.to_thread(shield.set_halt, svc().db, True, body.reason or "stopped from the dashboard")
+        st = await asyncio.to_thread(shield_state)
+        await svc().hub.broadcast("shield_changed", st)
+        await svc().notifier.send(f"[SHIELD] Kill switch ON: {st['halt_reason']}. Every new alert is blocked "
+                                  "until you resume.")
+        return st
+
+    @app.post("/api/shield/resume", dependencies=[Depends(require_dashboard)])
+    async def resume():
+        await asyncio.to_thread(shield.set_halt, svc().db, False, None)
+        st = await asyncio.to_thread(shield_state)
+        await svc().hub.broadcast("shield_changed", st)
+        await svc().notifier.send("[SHIELD] Kill switch OFF: new alerts are analysed again.")
+        return st
 
     @app.get("/api/account", dependencies=[Depends(require_dashboard)])
     async def get_account():

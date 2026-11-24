@@ -189,11 +189,14 @@ class TestEnvFile:
         env = tmp_path / ".env"
         env.write_text(text)
         for k in ("ACCOUNT_BALANCE", "TELEGRAM_BOT_TOKEN", "ANTHROPIC_API_KEY", "WEBHOOK_SECRET", "DASHBOARD_TOKEN",
-                  "CONTRACT_SPECS_FILE", "DRAWDOWN_LIMIT"):
+                  "CONTRACT_SPECS_FILE", "DRAWDOWN_LIMIT", "DRAWDOWN_MODE", "DISCORD_WEBHOOK_URL",
+                  "ENTRY_WINDOW", "DAILY_LOSS_LIMIT"):
             monkeypatch.delenv(k, raising=False)
         s = Settings(_env_file=str(env))
         assert s.telegram_bot_token is None and not s.telegram_enabled and s.anthropic_api_key is None
-        assert (s.account_balance, s.risk_percent, s.drawdown_limit, s.drawdown_mode) == (25000, 1.0, 1000, "static")
+        assert (s.account_balance, s.risk_percent, s.drawdown_limit, s.drawdown_mode) == (25000, 1.0, 1000, "eod_trailing")
+        assert (s.drawdown_lock_above_start, s.account_phase, s.daily_loss_limit) == (100, "evaluation", 500)
+        assert (s.max_consecutive_losses, s.entry_window, s.discord_webhook_url) == (2, "09:35-11:30", None)
         assert s.allowed_futures_roots == ["NQ", "MNQ"] and s.allowed_asset_classes == ["future"]
         assert (s.min_reward_risk, s.rr_target_index, s.target_ladder, s.max_target_r) == (2.0, 1, [2, 3, 5], 5)
         assert s.contract_specs_file == "../config/nasdaq_futures.json"   # inline comment stripped

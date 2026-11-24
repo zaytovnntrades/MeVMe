@@ -141,6 +141,11 @@ class JournalUpdate(BaseModel):
     notes: str | None = Field(default=None, max_length=2000)
 
 
+class HaltRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    reason: str | None = Field(default=None, max_length=200)
+
+
 class WebhookAck(BaseModel):
     status: Literal["accepted", "duplicate"]
     alert_id: int | None
