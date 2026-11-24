@@ -32,6 +32,10 @@ Settings (environment variables):
   GATE_REVIEW_TIMEOUT  seconds, default 15. Grok slower than this counts as an error.
   LLM_PROVIDER         "xai" (default) or "freellmapi"; see grok_client.py for LLM_BASE_URL/LLM_API_KEY/LLM_MODEL.
   GATE_ALLOW_FREE_LLM_LIVE  "1" to allow GATE_LIVE=1 with freellmapi (refused by default).
+  GATE_RISK            risk limits file, default risk.json (see risk.example.json). Missing = no limits.
+  GATE_LEDGER          daily entry ledger, default gate_ledger.json (gate_ledger.dry.json in dry run).
+  GATE_HALT_FILE       kill switch, default HALT. While this file exists every new entry is blocked;
+                       exits still go through.  `touch HALT` to stop, `rm HALT` to resume.
 """
 import argparse
 import hashlib
@@ -50,6 +54,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import grok_client  # noqa: E402
+import risk  # noqa: E402
 
 FORWARD_BASE = "https://fastcloud.daviddtech.com"
 EXCHANGES = {"bybit", "blofin", "toobit", "weex", "bitunix"}
@@ -223,37 +228,61 @@ def log_event(entry: dict) -> None:
         f.write(line + "\n")
 
 
+def _committed(forward_result: str) -> bool:
+    """Count a sent entry against the daily limits unless StrategyFactory clearly refused it (4xx).
+    A timeout or 5xx may still have filled, so for risk accounting it counts."""
+    return not forward_result.startswith("HTTP 4") and not forward_result.startswith("not forwarded")
+
+
 def process(payload: dict, cfg: dict, analyzer=ask_grok, forwarder=forward, deduper=None) -> dict:
     now = time.time()
     kind, direction = classify(payload)
     entry = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "kind": kind, "direction": direction,
              "symbol": payload.get("coin_pair"), "exchange": payload.get("exchange"),
              "live": cfg["live"]}
-    if kind == "exit":  # never deduped, never reviewed, retried
+    if kind == "exit":  # never halted, risk-checked, deduped or reviewed; retried
         entry.update(approved=True, reason="exit: forwarded without review")
         entry["forward"] = forwarder(payload, attempts=3) if cfg["live"] else "dry run: not forwarded"
         log_event(entry)
         return entry
-    if deduper and deduper.is_dup(payload, now):
-        entry.update(approved=False, reason="duplicate entry inside dedup window")
+
+    def finish(approved: bool, reason: str) -> dict:
+        entry.update(approved=approved, reason=reason)
         log_event(entry)
         return entry
+
+    if risk.halted(cfg.get("halt_file")):
+        return finish(False, f"halted: {cfg['halt_file']} exists (delete it to resume entries)")
+    if deduper and deduper.is_dup(payload, now):
+        return finish(False, "duplicate entry inside dedup window")
     blocked = precheck(payload, now, cfg.get("max_age", 60))
     if blocked:
-        approved, reason = False, f"precheck: {blocked}"
-    else:
-        try:
-            grok = analyzer(payload, direction)
-            entry["grok"] = grok
-            approved, reason = decide(grok, direction, cfg["mode"], cfg["min_conf"])
-        except Exception as e:  # noqa: BLE001
-            approved = cfg["on_error"] == "allow"
-            reason = f"grok error ({e}); on_error={cfg['on_error']}"
-    entry.update(approved=approved, reason=reason)
+        return finish(False, f"precheck: {blocked}")
+
+    limits, ledger = cfg.get("limits") or {}, cfg.get("ledger")
+    m = risk.measure(payload, limits)
+    entry["risk"] = {k: (round(v, 4) if isinstance(v, float) else v) for k, v in m.items()}
+    reasons = risk.check_static(m, limits)
+    rid = None
+    if not reasons and ledger:
+        rid, reasons = ledger.reserve(m, limits)
+    if reasons:
+        entry["risk"]["blocked_by"] = reasons
+        return finish(False, "risk: " + "; ".join(reasons))
+
+    try:
+        grok = analyzer(payload, direction)
+        entry["grok"] = grok
+        approved, reason = decide(grok, direction, cfg["mode"], cfg["min_conf"])
+    except Exception as e:  # noqa: BLE001
+        approved = cfg["on_error"] == "allow"
+        reason = f"grok error ({e}); on_error={cfg['on_error']}"
     if approved:
         entry["forward"] = forwarder(payload) if cfg["live"] else "dry run: not forwarded"
-    log_event(entry)
-    return entry
+    if rid:
+        (ledger.commit if approved and _committed(entry["forward"]) else ledger.release)(rid)
+        entry["risk"]["day"] = ledger.totals()
+    return finish(approved, reason)
 
 
 # ---------------------------------------------------------------- server
@@ -271,7 +300,8 @@ def load_cfg() -> dict:
     return {"token": token, "live": os.environ.get("GATE_LIVE") == "1", "mode": mode,
             "min_conf": int(os.environ.get("GATE_MIN_CONFIDENCE", "70")), "on_error": on_error,
             "max_age": float(os.environ.get("GATE_MAX_AGE", "60")),
-            "dedup_sec": float(os.environ.get("GATE_DEDUP_SEC", "60"))}
+            "dedup_sec": float(os.environ.get("GATE_DEDUP_SEC", "60")),
+            "halt_file": os.environ.get("GATE_HALT_FILE", "HALT")}
 
 
 def make_handler(cfg: dict, analyzer=ask_grok, forwarder=forward):
@@ -318,7 +348,18 @@ def serve() -> None:
         sys.exit("Refusing LIVE mode with LLM_PROVIDER=freellmapi: free tiers switch models and run out "
                  "of quota mid-day, so entries would be judged inconsistently or blocked. Use it in dry "
                  "run to compare, or set GATE_ALLOW_FREE_LLM_LIVE=1 if you accept that.")
+    try:
+        cfg["limits"] = risk.load_limits(os.environ.get("GATE_RISK", "risk.json"))
+    except (ValueError, json.JSONDecodeError) as e:
+        sys.exit(f"Risk limits not loaded, refusing to start: {e}")
+    cfg["ledger"] = risk.Ledger(os.environ.get(
+        "GATE_LEDGER", "gate_ledger.json" if cfg["live"] else "gate_ledger.dry.json"))
     print(f"Reviewer: {grok_client.describe()}")
+    print(f"Risk: {risk.describe(cfg['limits'])}")
+    print(f"Kill switch: create '{cfg['halt_file']}' to block all new entries"
+          + ("  ** HALTED NOW **" if risk.halted(cfg["halt_file"]) else ""))
+    if cfg["live"] and not cfg["limits"]:
+        print("WARNING: LIVE with no risk limits. Copy risk.example.json to risk.json first.")
     print(f"Grok gate on {host}:{port}  mode={cfg['mode']} min_conf={cfg['min_conf']} "
           f"on_error={cfg['on_error']}  {'LIVE - approved alerts WILL trade' if cfg['live'] else 'DRY RUN'}")
     print("Webhook path: /tv/<GATE_TOKEN>   health: /health")

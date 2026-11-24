@@ -6,7 +6,9 @@ Python standard library only. Nothing to install.
 |---|---|
 | `grok_client.py` | Talks to the Grok (xAI) API: `models`, `ask`, `respond`, `signal` |
 | `grok_gate.py` | Webhook relay: Grok reviews TradingView **entries** before they reach StrategyFactory |
-| `test_grok_gate.py` | Offline tests with a fake Grok and a fake StrategyFactory: `python3 -m unittest test_grok_gate -v` |
+| `risk.py` | Risk limits checked in code before Grok: leverage, size, stop-loss, per-trade and daily risk, symbol lists, kill switch |
+| `risk.example.json` | Starter limits for a $1,000 account. Copy it to `risk.json` |
+| `test_grok_gate.py`, `test_risk.py` | Offline tests (66): `python3 -m unittest test_grok_gate test_risk -v` |
 
 ## Switching provider: Grok or FreeLLMAPI
 
@@ -57,6 +59,46 @@ TradingView alert ──► grok_gate  /tv/<GATE_TOKEN>
 - **Dry run by default.** Nothing trades until you start it with `GATE_LIVE=1`.
 - `gate_notes` is read by Grok and stripped before forwarding, so StrategyFactory receives exactly what the builder generated.
 - Every decision goes to `gate_log.jsonl`. Credentials are never logged.
+
+## Risk limits (ported from trader-risk)
+
+Every new entry passes these checks **before** Grok is asked, so a blocked trade costs no API call. Exits skip all of them, so you can always get out of a position.
+
+```
+entry ─► kill switch ─► duplicate ─► precheck ─► risk limits ─► daily ledger ─► Grok ─► send
+exit  ─────────────────────────────────────────────────────────────────────────────────► send (retried)
+```
+
+```bash
+cp risk.example.json risk.json     # then edit the numbers for your account
+touch HALT                          # kill switch: block every new entry right now
+rm HALT                             # resume
+```
+
+| Key | Blocks an entry when |
+|---|---|
+| `blocked_symbols` / `allowed_symbols` | the symbol is blocked, or not on the allowed list (`BTCUSDT.P` and `BYBIT:BTCUSDT` both count as `BTCUSDT`) |
+| `max_leverage` | leverage is higher |
+| `max_margin_usdt` | margin committed is higher |
+| `max_notional_usdt` | position size (margin × leverage) is higher. **This is your real exposure.** |
+| `max_wallet_pct` | a %-of-wallet order is bigger |
+| `require_stop_loss` | there's no stop-loss (`--sl` in the builder) |
+| `max_stop_loss_pct` | the stop is wider than this % from entry |
+| `max_risk_usdt` | the loss if the stop is hit (position size × stop %) is higher |
+| `max_entries_per_day` / `max_entries_per_symbol_per_day` | today's count (UTC) is used up |
+| `max_daily_risk_usdt` | today's stop-loss risk plus this trade's would go over the cap |
+| `account_usdt` | not a rule: lets the gate value %-of-wallet orders in USDT |
+
+- **Every failing rule is listed**, not just the first, so one read gives you the whole fix-list. The details are in each log line under `risk`.
+- **An order the gate can't value is blocked, not waved through.** A %-of-wallet order needs `account_usdt`, and a base-quantity order needs `signal_price`. The builder's `--include-signal-meta` sends `signal_price`.
+- **A typo in `risk.json` stops the gate from starting**, so a misspelled key can't silently turn a rule off. A missing `risk.json` means no limits. Live mode then warns at start-up.
+- **The daily ledger** is `gate_ledger.json`, or `gate_ledger.dry.json` in dry run so practice runs don't use up your live budget. It survives restarts and resets at UTC midnight.
+  - Budget is **reserved before Grok is asked**, so two alerts arriving together can't both squeeze under a cap.
+  - It's **released if Grok vetoes** the trade or StrategyFactory refuses it with a 4xx.
+  - A timeout or 5xx **still counts**, because the order may have filled.
+- **What the gate can't see:** your balance, open positions and profit or loss live on the exchange. `max_daily_risk_usdt` therefore caps the worst-case loss you *commit to* each day, not your actual losses. Keep a daily loss limit on the exchange too, if it offers one.
+
+**Rule of thumb from the example:** risk about 2% of the account per trade and about 6% per day. On $1,000, that's $100 margin at 10x with a 2% stop, which risks $20, and a $60 daily cap, which allows three losing trades.
 
 ## Setup, step by step
 
