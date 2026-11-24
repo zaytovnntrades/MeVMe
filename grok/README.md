@@ -20,6 +20,9 @@ TradingView alert ──► grok_gate  /tv/<GATE_TOKEN>
 
 - **veto** mode (default): an entry is blocked only when Grok leans the *opposite* way with confidence ≥ `GATE_MIN_CONFIDENCE` (default 70).
 - **confirm** mode: an entry is allowed only when Grok *agrees* with confidence ≥ the threshold.
+- **Code checks run before Grok** and need no API call: quantity must be above 0, the pair must have no unfilled `{{ticker}}`, the signal must be under `GATE_MAX_AGE` seconds old (epoch or `{{timenow}}` ISO time), and an identical entry inside `GATE_DEDUP_SEC` is dropped.
+- **Exits are never deduped or reviewed.** If StrategyFactory has a network error or returns 5xx, they're retried up to 3 times.
+- **Grok has `GATE_REVIEW_TIMEOUT` seconds** (default 15) to answer, so a slow answer can't approve a trade on stale data.
 - **If Grok errors or times out**, entries are blocked (`GATE_ON_ERROR=block`). Set `allow` to trade without review instead.
 - **Dry run by default.** Nothing trades until you start it with `GATE_LIVE=1`.
 - `gate_notes` is read by Grok and stripped before forwarding, so StrategyFactory receives exactly what the builder generated.

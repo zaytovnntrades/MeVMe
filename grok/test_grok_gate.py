@@ -8,6 +8,7 @@ import tempfile
 import threading
 import time
 import unittest
+from datetime import datetime, timezone
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -35,6 +36,7 @@ class Fakes:
                            "risk_note": "y"}
         self.grok_status = 200
         self.grok_requests, self.forwarded = [], []
+        self.forward_statuses = []  # popped per forward; empty = 200
         fakes = self
 
         class H(BaseHTTPRequestHandler):
@@ -49,7 +51,8 @@ class Fakes:
                     code = fakes.grok_status
                 else:
                     fakes.forwarded.append((self.path, body))
-                    out, code = '{"success":true}', 200
+                    code = fakes.forward_statuses.pop(0) if fakes.forward_statuses else 200
+                    out = '{"success":true}' if code == 200 else '{"error":"down"}'
                 self.send_response(code)
                 self.end_headers()
                 self.wfile.write(out.encode())
@@ -79,6 +82,31 @@ class LogicTests(unittest.TestCase):
         self.assertFalse(d({"bias": "neutral", "confidence": 99}, "short", "confirm", 70)[0])
         self.assertFalse(d({"bias": "short", "confidence": 69}, "short", "confirm", 70)[0])
         self.assertFalse(d({"bias": "short", "confidence": "junk"}, "short", "confirm", 70)[0])
+
+    def test_signal_age_formats(self):
+        now = 1_800_000_000.0
+        self.assertAlmostEqual(grok_gate.signal_age(str(now - 5), now), 5)
+        self.assertAlmostEqual(grok_gate.signal_age(int((now - 5) * 1000), now), 5)  # milliseconds
+        iso = datetime.fromtimestamp(now - 90, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")  # {{timenow}}
+        self.assertAlmostEqual(grok_gate.signal_age(iso, now), 90)
+        self.assertIsNone(grok_gate.signal_age("garbage", now))
+        self.assertIsNone(grok_gate.signal_age(None, now))
+
+    def test_precheck(self):
+        now = time.time()
+        self.assertIsNone(grok_gate.precheck(LONG, now, 60))
+        self.assertIn("qty", grok_gate.precheck({**LONG, "qty": "0"}, now, 60))
+        self.assertIn("qty", grok_gate.precheck({**LONG, "qty": "abc"}, now, 60))
+        self.assertIn("placeholder", grok_gate.precheck({**LONG, "coin_pair": "{{ticker}}"}, now, 60))
+        self.assertIn("stale", grok_gate.precheck({**LONG, "time": str(now - 120)}, now, 60))
+        self.assertIsNone(grok_gate.precheck({**LONG, "time": str(now - 10)}, now, 60))
+
+    def test_deduper_window(self):
+        d = grok_gate.Deduper(60)
+        self.assertFalse(d.is_dup(LONG, 1000))
+        self.assertTrue(d.is_dup(dict(LONG), 1030))
+        self.assertFalse(d.is_dup(LONG, 1100))  # window passed
+        self.assertFalse(d.is_dup({**LONG, "time": "x"}, 1101))
 
     def test_strip_and_redact(self):
         self.assertNotIn("gate_notes", grok_gate.forward_body(LONG))
@@ -181,6 +209,66 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual(self.post(f"{gate}/tv/{TOKEN}", ["not", "an", "object"]), 400)
         time.sleep(0.3)
         self.assertEqual(self.fakes.grok_requests + self.fakes.forwarded, [])
+
+    def test_builder_close_never_reaches_grok(self):
+        """Bug in the pasted gate: reduce_by_percent closes were sent to review."""
+        gate = self.start_gate(CFG)
+        self.post(f"{gate}/tv/{TOKEN}", {**CLOSE_LONG, "position": "4"})
+        self.logs(1)
+        self.assertEqual(self.fakes.grok_requests, [])
+
+    def test_exit_retried_when_strategyfactory_errors(self):
+        """Bug in the pasted gate: a close was dropped when the executor returned 5xx."""
+        self.fakes.forward_statuses = [502, 503]
+        orig = grok_gate.time.sleep
+        grok_gate.time.sleep = lambda s: None
+        self.addCleanup(setattr, grok_gate.time, "sleep", orig)
+        gate = self.start_gate(CFG)
+        self.post(f"{gate}/tv/{TOKEN}", CLOSE_LONG)
+        log = self.logs(1)[0]
+        self.assertEqual(len(self.fakes.forwarded), 3)
+        self.assertTrue(log["forward"].startswith("HTTP 200"))
+
+    def test_exit_not_retried_on_4xx(self):
+        self.fakes.forward_statuses = [400]
+        gate = self.start_gate(CFG)
+        self.post(f"{gate}/tv/{TOKEN}", CLOSE_LONG)
+        self.assertTrue(self.logs(1)[0]["forward"].startswith("HTTP 400"))
+        self.assertEqual(len(self.fakes.forwarded), 1)
+
+    def test_iso_timenow_fresh_entry_is_reviewed(self):
+        """Bug in the pasted gate: {{timenow}} ISO strings crashed the review and blocked every entry."""
+        gate = self.start_gate(CFG)
+        iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        self.post(f"{gate}/tv/{TOKEN}", {**LONG, "time": iso})
+        self.assertTrue(self.logs(1)[0]["approved"])
+        self.assertEqual(len(self.fakes.grok_requests), 1)
+
+    def test_stale_entry_blocked_without_calling_grok(self):
+        gate = self.start_gate(CFG)
+        self.post(f"{gate}/tv/{TOKEN}", {**LONG, "time": str(time.time() - 600)})
+        log = self.logs(1)[0]
+        self.assertFalse(log["approved"])
+        self.assertIn("stale", log["reason"])
+        self.assertEqual(self.fakes.grok_requests + self.fakes.forwarded, [])
+
+    def test_duplicate_entry_dropped_but_duplicate_exit_forwarded(self):
+        gate = self.start_gate(CFG)
+        for _ in range(2):
+            self.post(f"{gate}/tv/{TOKEN}", LONG)
+        logs = self.logs(2)
+        self.assertEqual(sorted(x["approved"] for x in logs), [False, True])
+        for _ in range(2):
+            self.post(f"{gate}/tv/{TOKEN}", CLOSE_LONG)
+        self.logs(4)
+        self.assertEqual([p for p, _ in self.fakes.forwarded].count("/webhooks/bybit"), 3)
+
+    def test_gate_token_never_forwarded(self):
+        """Bug in the pasted gate: the token travelled in the body and was forwarded to the executor."""
+        gate = self.start_gate(CFG)
+        self.post(f"{gate}/tv/{TOKEN}", LONG)
+        self.logs(1)
+        self.assertNotIn(TOKEN, json.dumps(self.fakes.forwarded))
 
     def test_log_never_contains_credentials(self):
         gate = self.start_gate(CFG)

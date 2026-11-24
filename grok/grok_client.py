@@ -34,7 +34,8 @@ def _key() -> str:
     return key
 
 
-def _request(method: str, path: str, body: dict | None = None, stream: bool = False):
+def _request(method: str, path: str, body: dict | None = None, stream: bool = False,
+             timeout: float = 120):
     req = urllib.request.Request(
         BASE_URL + path,
         data=json.dumps(body).encode() if body is not None else None,
@@ -42,11 +43,13 @@ def _request(method: str, path: str, body: dict | None = None, stream: bool = Fa
         method=method,
     )
     try:
-        resp = urllib.request.urlopen(req, timeout=120)
+        resp = urllib.request.urlopen(req, timeout=timeout)
     except urllib.error.HTTPError as e:
         sys.exit(f"HTTP {e.code}: {e.read().decode(errors='replace')[:500]}")
     except urllib.error.URLError as e:
         sys.exit(f"Cannot reach {BASE_URL}: {e.reason}")
+    except TimeoutError:
+        sys.exit(f"Timed out after {timeout}s waiting for {BASE_URL}")
     if stream:
         return resp
     with resp:
@@ -58,11 +61,11 @@ def list_models() -> list[str]:
 
 
 def chat(messages: list[dict], model: str = DEFAULT_MODEL, temperature: float = 0.3,
-         json_mode: bool = False) -> str:
+         json_mode: bool = False, timeout: float = 120) -> str:
     body = {"model": model, "messages": messages, "temperature": temperature}
     if json_mode:
         body["response_format"] = {"type": "json_object"}
-    data = _request("POST", "/chat/completions", body)
+    data = _request("POST", "/chat/completions", body, timeout=timeout)
     return data["choices"][0]["message"]["content"]
 
 
