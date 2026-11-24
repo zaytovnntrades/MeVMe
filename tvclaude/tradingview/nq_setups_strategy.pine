@@ -39,6 +39,9 @@ grpAlert = "Alerts (tvclaude)"
 sendJson = input.bool(true, "Send a tvclaude JSON alert on each entry", group = grpAlert)
 secret   = input.string("REPLACE_WITH_WEBHOOK_SECRET", "Webhook secret", group = grpAlert)
 
+grpFx   = "Panel"
+showCcy = input.string("EUR", "Also show amounts in", options = ["None", "EUR", "GBP", "CAD", "JPY", "AUD", "CHF"], group = grpFx)
+
 allowLong  = dirMode != "Short only"
 allowShort = dirMode != "Long only"
 
@@ -96,6 +99,11 @@ strategy.risk.max_intraday_loss(maxLosses * riskUsd, strategy.cash)
 
 // ---------------------------------------------------------------- the two candidate setups
 pv = syminfo.pointvalue                 // MNQ = 2, NQ = 20
+
+// Display only: the daily rate from the strategy's currency (USD) to the panel currency. Sizing never uses it.
+fxCcy  = showCcy == "None" ? strategy.account_currency : showCcy
+fxRate = request.currency_rate(strategy.account_currency, fxCcy, ignore_invalid_currency = true)
+fx(float amount) => na(fxRate) ? "n/a" : str.tostring(amount * fxRate, "#,##0.00") + " " + fxCcy
 
 contracts(float rPts) => rPts > 0 ? math.floor(riskUsd / (rPts * pv)) : 0
 nearer(float a, float b, bool above) => na(a) ? b : na(b) ? a : above ? math.min(a, b) : math.max(a, b)
@@ -241,7 +249,7 @@ plotshape(takeLong, "Long entry", shape.triangleup, location.belowbar, color.gre
 plotshape(takeShort, "Short entry", shape.triangledown, location.abovebar, color.red, size = size.small)
 bgcolor(inWindow ? color.new(color.blue, 95) : na, title = "Entry window")
 
-var table info = table.new(position.top_right, 2, 6, bgcolor = color.new(color.black, 15), border_width = 1)
+var table info = table.new(position.top_right, 2, 9, bgcolor = color.new(color.black, 15), border_width = 1)
 if barstate.islast
     biasTxt = bullBias ? "Bullish" : bearBias ? "Bearish" : "Neutral (no trades)"
     table.cell(info, 0, 0, "15m bias", text_color = color.silver)
@@ -257,3 +265,13 @@ if barstate.islast
     table.cell(info, 1, 4, str.tostring(pv) + "  (risk $" + str.tostring(riskUsd) + ")", text_color = color.white)
     table.cell(info, 0, 5, "Last signal", text_color = color.silver)
     table.cell(info, 1, 5, lastNote, text_color = color.white)
+    if showCcy != "None"
+        ccy = strategy.account_currency
+        table.cell(info, 0, 6, "1 " + ccy + " =", text_color = color.silver)
+        table.cell(info, 1, 6, na(fxRate) ? "n/a" : str.tostring(fxRate, "#.####") + " " + fxCcy + "  (daily rate)",
+             text_color = color.white)
+        table.cell(info, 0, 7, "Risk per trade", text_color = color.silver)
+        table.cell(info, 1, 7, str.tostring(riskUsd, "#,##0") + " " + ccy + " = " + fx(riskUsd), text_color = color.white)
+        table.cell(info, 0, 8, "Net P&L", text_color = color.silver)
+        table.cell(info, 1, 8, str.tostring(strategy.netprofit, "#,##0.00") + " " + ccy + " = " + fx(strategy.netprofit),
+             text_color = strategy.netprofit >= 0 ? color.lime : color.red)

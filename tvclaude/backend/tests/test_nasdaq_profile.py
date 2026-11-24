@@ -230,3 +230,10 @@ class TestPineScripts:
         for piece in ("low - bufTicks", "high + bufTicks", "ta.crossover(close, swingHigh)", "ta.crossunder(close, swingLow)",
                       "math.min(a, b)", "math.max(a, b)", "close + dir * tp1R * rPts"):
             assert piece in src, piece
+
+    def test_panel_currency_rate_is_display_only(self):
+        src = (self.ROOT / "nq_setups_strategy.pine").read_text()
+        assert "request.currency_rate(strategy.account_currency, fxCcy, ignore_invalid_currency = true)" in src
+        assert '"Also show amounts in"' in src and '"None"' in src
+        sizing = src[src.index("contracts(float rPts)"):src.index("nearer(")]
+        assert "fxRate" not in sizing          # the rate never changes position size
