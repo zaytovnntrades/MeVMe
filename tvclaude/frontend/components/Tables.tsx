@@ -19,7 +19,7 @@ export function Journal({ entries, onChange }: { entries: JournalEntry[]; onChan
       {err && <div className="body"><div className="err">{err}</div></div>}
       {entries.length === 0 ? <div className="empty">No journal entries yet. Add one from an analysis.</div> : (
         <div className="tablewrap scroll"><table className="data num">
-          <thead><tr><th>Date</th><th>Symbol</th><th>Side</th><th>Entry</th><th>Stop</th><th>Targets</th><th>Qty</th><th>Status</th><th>Exit</th><th>R</th><th>P&L</th><th></th></tr></thead>
+          <thead><tr><th>Date</th><th>Symbol</th><th>Side</th><th>Entry</th><th>Stop</th><th>Targets</th><th>Qty</th><th>Status</th><th>Exit</th><th>R</th><th>P&L</th><th>Rules?</th><th></th></tr></thead>
           <tbody>{entries.map((j) => (
             <tr key={j.id}>
               <td>{new Date(j.created_at).toLocaleDateString()}</td><td>{j.symbol}</td>
@@ -28,6 +28,11 @@ export function Journal({ entries, onChange }: { entries: JournalEntry[]; onChan
               <td>{fmt(j.quantity, 6)}</td><td>{j.status}</td><td>{fmt(j.exit_price, 4)}</td>
               <td className={(j.r_multiple ?? 0) >= 0 ? "pos" : "neg"}>{j.r_multiple === null ? "—" : `${j.r_multiple}R`}</td>
               <td className={(j.pnl ?? 0) >= 0 ? "pos" : "neg"}>{fmt(j.pnl)}</td>
+              <td>{j.status === "closed" ? (
+                <span style={{ display: "inline-flex", gap: 4 }}>
+                  <button className={`btn small ${j.rules_followed === true ? "primary" : ""}`} onClick={() => update(j.id, { rules_followed: true })}>Yes</button>
+                  <button className={`btn small ${j.rules_followed === false ? "kill" : ""}`} onClick={() => update(j.id, { rules_followed: false })}>No</button>
+                </span>) : "—"}</td>
               <td>{j.status !== "closed" && j.status !== "skipped" && (
                 <span style={{ display: "inline-flex", gap: 4 }}>
                   {j.status === "planned" && <button className="btn small" onClick={() => update(j.id, { status: "open" })}>Open</button>}

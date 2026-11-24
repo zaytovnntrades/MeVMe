@@ -197,6 +197,7 @@ class TestEnvFile:
         assert (s.account_balance, s.risk_percent, s.drawdown_limit, s.drawdown_mode) == (25000, 1.0, 1000, "eod_trailing")
         assert (s.drawdown_lock_above_start, s.account_phase, s.daily_loss_limit) == (100, "evaluation", 500)
         assert (s.max_consecutive_losses, s.entry_window, s.discord_webhook_url) == (2, "09:35-11:30", None)
+        assert (s.daily_report_time, s.weekly_review_day) == ("16:05", "Fri")
         assert s.allowed_futures_roots == ["NQ", "MNQ"] and s.allowed_asset_classes == ["future"]
         assert (s.min_reward_risk, s.rr_target_index, s.target_ladder, s.max_target_r) == (2.0, 1, [2, 3, 5], 5)
         assert s.contract_specs_file == "../config/nasdaq_futures.json"   # inline comment stripped

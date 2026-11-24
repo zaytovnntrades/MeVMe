@@ -12,6 +12,8 @@ from dataclasses import dataclass
 from datetime import datetime, time, timezone
 
 from .account import NY, AccountState
+from sqlalchemy.exc import IntegrityError
+
 from .db import Database, ShieldState, utcnow
 
 
@@ -70,17 +72,23 @@ def precheck(*, now: datetime, halted: bool, halt_reason: str | None, acct: Acco
 def get_halt(db: Database) -> ShieldState:
     with db.Session() as ses:
         row = ses.get(ShieldState, 1)
-        if row is None:
+        if row is not None:
+            return row
+        try:
             row = ShieldState(id=1, halted=False, reason=None)
             ses.add(row)
             ses.commit()
             ses.refresh(row)
-        return row
+            return row
+        except IntegrityError:          # another request created it at the same moment
+            ses.rollback()
+            return ses.get(ShieldState, 1)
 
 
 def set_halt(db: Database, halted: bool, reason: str | None) -> ShieldState:
+    get_halt(db)                        # make sure the row exists first
     with db.Session() as ses:
-        row = ses.get(ShieldState, 1) or ShieldState(id=1)
+        row = ses.get(ShieldState, 1)
         row.halted, row.reason, row.updated_at = halted, (reason if halted else None), utcnow()
         ses.add(row)
         ses.commit()

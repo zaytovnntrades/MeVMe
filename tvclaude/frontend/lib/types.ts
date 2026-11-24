@@ -51,6 +51,7 @@ export interface JournalEntry {
   side: "long" | "short"; entry: number; stop_loss: number; take_profit: number[]; quantity: number | null;
   multiplier: number; status: "planned" | "open" | "closed" | "skipped"; exit_price: number | null;
   pnl: number | null; r_multiple: number | null; closed_at: string | null; notes: string | null;
+  rules_followed: boolean | null;
 }
 
 export interface Status {
@@ -69,3 +70,16 @@ export interface Performance {
     journal: { closed_trades?: number; wins?: number; win_rate?: number | null; avg_r?: number | null; total_pnl?: number };
   }>;
 }
+
+export interface LabCheck { check: string; value: number | string | null; pass: boolean }
+export interface LabRun {
+  id: number; filename: string | null; params: { fee_per_contract: number; chart_tz: string };
+  trades: number; wins: number; losses: number; win_rate: number | null; total_net: number; total_fees: number;
+  avg_win: number | null; avg_loss: number | null; expectancy_usd: number | null; expectancy_r: number | null;
+  profit_factor: number | null; max_drawdown_usd: number; max_consecutive_losses: number; days_traded: number;
+  worst_day: { day: string; net: number } | null; days_past_daily_limit: number;
+  first_trade: string | null; last_trade: string | null;
+  drawdown_rule: { breached: boolean; breach_date?: string; mode?: string; limit: number | null };
+  verdict: "PASS" | "NOT YET"; checks: LabCheck[]; notes: string[];
+}
+export interface ReportPreview { day: string; text: string; decision?: string }

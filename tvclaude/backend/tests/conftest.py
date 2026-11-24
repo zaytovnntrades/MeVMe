@@ -55,6 +55,21 @@ class FakeAnalyst:
         return self.result, AnalysisMeta(model="claude-opus-5-5", latency_ms=5, input_tokens=900, output_tokens=400)
 
 
+class FakeWriter:
+    """Stands in for ClaudeWriter: no network. `result=None` simulates a failed write."""
+
+    def __init__(self, result="default"):
+        self.result, self.calls = result, []
+
+    async def write(self, kind, facts):
+        self.calls.append((kind, facts))
+        if self.result != "default":
+            return self.result
+        return {"summary": "Quiet session; one setup, rules held."} if kind == "daily" else \
+            {"headline": "Rules held, sample still small.", "what_worked": ["Waited for the window"],
+             "what_to_fix": ["Rate every trade"], "one_change": "Mark rules followed after each trade."}
+
+
 def make_settings(tmp_path, **kw) -> Settings:
     specs = tmp_path / "specs.json"
     specs.write_text(json.dumps({"futures": {"MNQ": {"multiplier": 2, "tick_size": 0.25}},
@@ -70,9 +85,11 @@ def make_settings(tmp_path, **kw) -> Settings:
 def make_client(tmp_path):
     clients = []
 
-    def _make(analyst=None, telegram=None, discord=None, clock=None, **settings_kw):
+    def _make(analyst=None, telegram=None, discord=None, clock=None, writer=None, start_coordinator=False,
+              **settings_kw):
         app = create_app(make_settings(tmp_path, **settings_kw), analyst=analyst or FakeAnalyst(),
-                         telegram=telegram or Telegram(None, None), discord=discord or Discord(None), clock=clock)
+                         telegram=telegram or Telegram(None, None), discord=discord or Discord(None), clock=clock,
+                         writer=writer or FakeWriter(), start_coordinator=start_coordinator)
         c = TestClient(app)
         c.__enter__()
         clients.append(c)

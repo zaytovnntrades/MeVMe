@@ -13,16 +13,17 @@ from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 from sqlalchemy import func, select
 
-from . import account, classify, shield, strategies
+from . import account, classify, coordinator, lab, shield, strategies
 from .analyst import ClaudeAnalyst
+from .writer import ClaudeWriter
 from .config import Settings, get_settings
-from .db import Alert, Analysis, Database, JournalEntry, utcnow
+from .db import Alert, Analysis, Database, JournalEntry, LabRun, utcnow
 from .infra import Deduper, Discord, Hub, MemoryQueue, Notifier, RateLimiter, RedisQueue, Telegram
 from .pipeline import Services, side_for, worker
 from .risk import ContractSpecs, RiskInputs, RiskManager, futures_root
 from .schemas import (AssetClass, HaltRequest, JournalCreate, JournalUpdate, RiskRequest, TradingViewAlert,
                       WebhookAck)
-from .serialize import alert_dict, analysis_dict, journal_dict
+from .serialize import alert_dict, analysis_dict, iso, journal_dict
 
 logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"),
                     format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -30,13 +31,15 @@ log = logging.getLogger("tvclaude")
 
 
 def create_app(settings: Settings | None = None, analyst=None, telegram: Telegram | None = None,
-               discord: Discord | None = None, start_workers: bool = True, clock=None) -> FastAPI:
+               discord: Discord | None = None, start_workers: bool = True, clock=None, writer=None,
+               start_coordinator: bool = True) -> FastAPI:
     settings = settings or get_settings()
     db = Database(settings.database_url)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         db.create_all()
+        shield.get_halt(db)          # create the kill-switch row once, before any request can race for it
         redis = None
         if settings.redis_url:
             import redis.asyncio as aioredis
@@ -51,12 +54,16 @@ def create_app(settings: Settings | None = None, analyst=None, telegram: Telegra
                              settings.allowed_futures_roots),
             queue=RedisQueue(redis) if redis else MemoryQueue(),
             hub=Hub(), clock=clock,
+            writer=writer if writer is not None else ClaudeWriter(settings.anthropic_model, 60,
+                                                                  api_key=settings.anthropic_api_key),
             notifier=Notifier(telegram or Telegram(settings.telegram_bot_token, settings.telegram_chat_id),
                               discord or Discord(settings.discord_webhook_url)))
         app.state.svc = svc
         app.state.limiter = RateLimiter(settings.rate_limit_per_minute, redis)
         app.state.dedup = Deduper(60, redis)
         tasks = [asyncio.create_task(worker(svc, i)) for i in range(settings.analysis_workers)] if start_workers else []
+        if start_workers and start_coordinator and settings.daily_report_time:
+            tasks.append(asyncio.create_task(coordinator.loop(svc)))
         app.state.workers = tasks
         log.info("ready: mode=%s model=%s workers=%d redis=%s", settings.trading_mode, settings.anthropic_model,
                  len(tasks), "on" if redis else "off")
@@ -247,6 +254,55 @@ def create_app(settings: Settings | None = None, analyst=None, telegram: Telegra
                 "new_setups_allowed_now": not blocks, "would_block": [b.reason for b in blocks],
                 "warnings": warnings}
 
+    # ------------------------------------------------------------------ Lab
+    @app.post("/api/lab/analyze", dependencies=[Depends(require_dashboard)])
+    async def lab_analyze(request: Request, fee_per_contract: float = Query(0.0, ge=0, le=100),
+                          chart_tz: str = Query("America/New_York", max_length=40),
+                          filename: str | None = Query(None, max_length=200)):
+        body = await request.body()
+        if len(body) > 5_000_000:
+            raise HTTPException(413, "file too large (max 5 MB)")
+        try:
+            trades = lab.parse(body.decode("utf-8-sig", errors="replace"), fee_per_contract, chart_tz)
+        except (lab.LabError, KeyError) as e:   # KeyError: unknown time zone
+            raise HTTPException(422, str(e))
+        res = lab.analyse(trades, risk_usd=svc().risk_per_trade(), daily_loss_limit=settings.daily_loss_limit,
+                          drawdown_limit=settings.drawdown_limit, drawdown_mode=settings.drawdown_mode,
+                          lock=settings.drawdown_lock_above_start).to_dict()
+        params = {"fee_per_contract": fee_per_contract, "chart_tz": chart_tz}
+
+        def save():
+            with svc().db.Session() as ses:
+                row = LabRun(filename=filename, params=params, result=res)
+                ses.add(row)
+                ses.commit()
+                return row.id
+        return {"id": await asyncio.to_thread(save), "filename": filename, "params": params, **res}
+
+    @app.get("/api/lab/runs", dependencies=[Depends(require_dashboard)])
+    async def lab_runs(limit: int = Query(20, ge=1, le=200)):
+        def q():
+            with svc().db.Session() as ses:
+                return [{"id": r.id, "created_at": iso(r.created_at), "filename": r.filename, "params": r.params,
+                         **r.result} for r in ses.scalars(select(LabRun).order_by(LabRun.id.desc()).limit(limit))]
+        return await asyncio.to_thread(q)
+
+    # ------------------------------------------------------------------ coordinator
+    @app.get("/api/coordinator/{kind}", dependencies=[Depends(require_dashboard)])
+    async def report_preview(kind: str, summary: bool = False):
+        if kind not in ("daily", "weekly"):
+            raise HTTPException(404, "kind must be daily or weekly")
+        build = coordinator.build_daily if kind == "daily" else coordinator.build_weekly
+        return await build(svc(), with_summary=summary)
+
+    @app.post("/api/coordinator/{kind}/send", dependencies=[Depends(require_dashboard)])
+    async def report_send(kind: str):
+        if kind not in ("daily", "weekly"):
+            raise HTTPException(404, "kind must be daily or weekly")
+        build = coordinator.build_daily if kind == "daily" else coordinator.build_weekly
+        r = await build(svc(), with_summary=True)
+        return {**await coordinator.send(svc(), kind, r), "text": r["text"]}
+
     @app.get("/api/shield", dependencies=[Depends(require_dashboard)])
     async def get_shield():
         return await asyncio.to_thread(shield_state)
@@ -336,6 +392,8 @@ def create_app(settings: Settings | None = None, analyst=None, telegram: Telegra
                     raise HTTPException(404, "journal entry not found")
                 if body.notes is not None:
                     j.notes = body.notes
+                if body.rules_followed is not None:
+                    j.rules_followed = body.rules_followed
                 if body.status:
                     if body.status == "closed" and body.exit_price is None and j.exit_price is None:
                         raise HTTPException(422, "closing an entry needs exit_price")

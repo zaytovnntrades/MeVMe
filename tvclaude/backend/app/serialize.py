@@ -35,4 +35,4 @@ def journal_dict(j: JournalEntry) -> dict:
             "entry": j.entry, "stop_loss": j.stop_loss, "take_profit": j.take_profit, "quantity": j.quantity,
             "multiplier": j.multiplier, "status": j.status, "exit_price": j.exit_price, "pnl": j.pnl,
             "r_multiple": j.r_multiple, "closed_at": iso(j.closed_at),
-            "notes": j.notes}
+            "notes": j.notes, "rules_followed": j.rules_followed}

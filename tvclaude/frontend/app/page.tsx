@@ -4,6 +4,7 @@ import { AnalysisView } from "@/components/AnalysisView";
 import { DecisionChip, Panel, timeAgo } from "@/components/bits";
 import { RiskCalculator } from "@/components/RiskCalculator";
 import { History, Journal, PerformancePanel } from "@/components/Tables";
+import { CoordinatorPanel, LabPanel } from "@/components/Phase2";
 import { api, ApiError, fmt, getToken, setToken, wsUrl } from "@/lib/api";
 import type { Alert, Analysis, JournalEntry, Performance, Shield, Status } from "@/lib/types";
 
@@ -212,6 +213,10 @@ export default function Page() {
         <div className="span-all two">
           <Journal entries={journal} onChange={async () => { setJournal(await api<JournalEntry[]>("/api/journal")); api<Status>("/api/status").then(setStatus).catch(() => {}); }} />
           <PerformancePanel perf={perf} />
+        </div>
+        <div className="span-all two">
+          <LabPanel />
+          <CoordinatorPanel />
         </div>
         <div className="span-all">
           <History analyses={analyses} onSelect={(a) => setSelected(a.alert_id)} />

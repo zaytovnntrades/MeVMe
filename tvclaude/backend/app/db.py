@@ -1,7 +1,7 @@
 """SQLAlchemy models. PostgreSQL in docker-compose; SQLite works for local runs and tests."""
 from datetime import datetime, timezone
 
-from sqlalchemy import JSON, DateTime, Float, ForeignKey, Integer, String, Text, create_engine
+from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Integer, String, Text, create_engine, inspect, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship, sessionmaker
 
 
@@ -71,6 +71,7 @@ class JournalEntry(Base):
     r_multiple: Mapped[float | None] = mapped_column(Float, nullable=True)
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    rules_followed: Mapped[bool | None] = mapped_column(Boolean, nullable=True)   # your own yes/no per trade
 
 
 class ShieldState(Base):
@@ -82,6 +83,26 @@ class ShieldState(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class LabRun(Base):
+    """One uploaded Strategy Tester export and what Lab computed from it."""
+    __tablename__ = "lab_runs"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    filename: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    params: Mapped[dict] = mapped_column(JSON)
+    result: Mapped[dict] = mapped_column(JSON)
+
+
+class ReportLog(Base):
+    """Reports the coordinator sent, so each one goes out once."""
+    __tablename__ = "report_log"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    kind: Mapped[str] = mapped_column(String(10))           # daily | weekly
+    day: Mapped[str] = mapped_column(String(10), index=True)  # New York date, YYYY-MM-DD
+    sent_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    text: Mapped[str] = mapped_column(Text)
+
+
 class Database:
     def __init__(self, url: str):
         kwargs = {"connect_args": {"check_same_thread": False}} if url.startswith("sqlite") else {"pool_pre_ping": True}
@@ -90,6 +111,20 @@ class Database:
 
     def create_all(self) -> None:
         Base.metadata.create_all(self.engine)
+        self._add_missing_columns()
+
+    def _add_missing_columns(self) -> None:
+        """create_all never alters existing tables; add new nullable columns to databases made earlier."""
+        added = {"journal": {"rules_followed": "BOOLEAN"}}
+        insp = inspect(self.engine)
+        with self.engine.begin() as c:
+            for table, cols in added.items():
+                if not insp.has_table(table):
+                    continue
+                have = {col["name"] for col in insp.get_columns(table)}
+                for name, ddl in cols.items():
+                    if name not in have:
+                        c.execute(text(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}"))
 
     def ping(self) -> bool:
         try:

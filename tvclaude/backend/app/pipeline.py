@@ -27,6 +27,7 @@ class Services:
     queue: object
     hub: Hub
     notifier: Notifier
+    writer: object = None                                 # ClaudeWriter (reports); None = facts only
     shield_notified: set = field(default_factory=set)   # (trading day, block kind) already announced
     clock: object = None                                  # tests can freeze time; default = now in UTC
 

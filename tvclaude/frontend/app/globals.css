@@ -137,3 +137,8 @@ table.data tr.click:hover td { background: var(--panel-2); }
 .btn.kill:hover { background: var(--bear-bg); border-color: var(--bear); }
 .btn.killon { background: var(--bear); border-color: var(--bear); color: #fff; animation: pulse 1.6s ease-in-out infinite; }
 @keyframes pulse { 50% { opacity: 0.75; } }
+
+/* ---------- reports ---------- */
+.report { white-space: pre-wrap; word-break: break-word; margin: 4px 0 0; padding: 10px 12px; background: var(--bg);
+  border: 1px solid var(--line); border-radius: 6px; font-family: var(--mono); font-size: 12px; line-height: 1.55;
+  max-height: 360px; overflow: auto; }

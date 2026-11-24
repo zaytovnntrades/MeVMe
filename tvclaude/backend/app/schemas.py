@@ -139,6 +139,7 @@ class JournalUpdate(BaseModel):
     status: Literal["planned", "open", "closed", "skipped"] | None = None
     exit_price: float | None = Field(default=None, gt=0)
     notes: str | None = Field(default=None, max_length=2000)
+    rules_followed: bool | None = None
 
 
 class HaltRequest(BaseModel):

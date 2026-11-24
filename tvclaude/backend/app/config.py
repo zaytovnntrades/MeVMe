@@ -50,6 +50,10 @@ class Settings(BaseSettings):
     max_consecutive_losses: int | None = None  # e.g. 2: done for the day after this many full losses in a row
     entry_window: str | None = None          # e.g. "09:35-11:30" New York time, Mon-Fri; empty = always
 
+    # --- coordinator ------------------------------------------------------------------------
+    daily_report_time: str | None = None     # e.g. "16:05" New York, weekdays; empty = no scheduled report
+    weekly_review_day: str = "Fri"           # Mon..Fri: the weekly review goes out after that day's report
+
     # --- what the system trades -----------------------------------------------------------
     allowed_asset_classes: list[str] = []    # empty = all; e.g. ["future"]
     allowed_futures_roots: list[str] = []    # empty = all; e.g. ["NQ", "MNQ"]
@@ -90,6 +94,24 @@ class Settings(BaseSettings):
     def _discord(cls, v: str | None) -> str | None:
         if v and not v.startswith(("https://discord.com/api/webhooks/", "https://discordapp.com/api/webhooks/")):
             raise ValueError("discord_webhook_url must be a Discord webhook URL (https://discord.com/api/webhooks/...)")
+        return v
+
+    @field_validator("daily_report_time")
+    @classmethod
+    def _report_time(cls, v: str | None) -> str | None:
+        if v:
+            from datetime import time
+            try:
+                time.fromisoformat(v)
+            except ValueError as e:
+                raise ValueError("daily_report_time must look like 16:05") from e
+        return v
+
+    @field_validator("weekly_review_day")
+    @classmethod
+    def _review_day(cls, v: str) -> str:
+        if v not in ("Mon", "Tue", "Wed", "Thu", "Fri"):
+            raise ValueError("weekly_review_day must be Mon, Tue, Wed, Thu or Fri")
         return v
 
     @field_validator("drawdown_mode")

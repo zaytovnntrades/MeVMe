@@ -60,6 +60,22 @@ That rule comes from MFF's help center for the Builder 25K plan. **Confirm the e
 
 **Messages:** set `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` and/or `DISCORD_WEBHOOK_URL`. Every message goes to every configured channel, one failing channel never blocks the other, and secrets are never logged.
 
+## The agent team (phase 2)
+
+Five agents, each with one job. The cards and plain-English prompts are in [`prompts/agents.md`](prompts/agents.md).
+
+| Agent | Job | Where |
+|---|---|---|
+| **Scout** | Flags setups and gets Claude's read | Pine strategy → webhook → `analyst.py` |
+| **Shield** | Blocks rule breaks; kill switch | `shield.py`, `risk.py`, `account.py` |
+| **Journal** | Logs paper trades with "rules followed?"; writes the weekly review | dashboard journal, `reports.py` |
+| **Lab** | Backtest check after fees: upload Strategy Tester → List of trades → Export | dashboard → Lab, `lab.py` |
+| **Coordinator** | One daily report to Telegram + Discord with the one decision it needs | `coordinator.py`, `DAILY_REPORT_TIME=16:05` |
+
+- **Lab's verdict:** PASS needs 100+ trades, +0.3R or better after fees, and no drawdown breach. Otherwise it's NOT YET.
+- **Reports:** the daily report goes out once per weekday, after `DAILY_REPORT_TIME` (New York), and the weekly review after the `WEEKLY_REVIEW_DAY` report. The **one decision** is chosen by fixed rules; Claude only writes a short summary, and if that fails the report still goes out. There's no market feed, so the report only quotes prices from your own alerts.
+- **Pilot (execution) isn't built.** See the end of `prompts/agents.md` for what would have to be true first.
+
 ## Run it
 
 ```bash
@@ -155,7 +171,7 @@ The secret goes in the JSON body because TradingView can't set headers. The serv
 ## Tests
 
 ```bash
-cd backend && .venv/bin/python -m pytest -q        # 174 tests, offline, no API cost
+cd backend && .venv/bin/python -m pytest -q        # 201 tests, offline, no API cost
 RUN_LIVE_CLAUDE_TESTS=1 ANTHROPIC_API_KEY=... .venv/bin/python -m pytest -q -k live   # one real Claude call
 ```
 
