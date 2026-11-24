@@ -1,0 +1,7 @@
+{
+  "name": "nq-trading",
+  "description": "NQ/MNQ futures toolkit: risk sizing with the 2R room test, guided replay practice, the NQ Setups Pine strategy, and tvclaude deployment. Analysis and paper trading only; nothing places orders.",
+  "version": "1.0.0",
+  "author": { "name": "Zaytovnn" },
+  "keywords": ["trading", "futures", "nq", "mnq", "tradingview", "pine", "risk"]
+}

@@ -1,0 +1,18 @@
+{
+  "name": "mevme",
+  "owner": { "name": "Zaytovnn" },
+  "metadata": {
+    "description": "Personal Claude Code plugins for NQ/MNQ futures paper trading: sizing, replay practice, Pine scripts and the tvclaude setup.",
+    "version": "1.0.0"
+  },
+  "plugins": [
+    {
+      "name": "nq-trading",
+      "source": "./plugins/nq-trading",
+      "description": "NQ/MNQ toolkit: $250 risk sizing with the 2R room test, guided replay practice, the NQ Setups Pine strategy, and tvclaude deployment. Analysis and paper trading only.",
+      "version": "1.0.0",
+      "category": "productivity",
+      "keywords": ["trading", "futures", "nq", "mnq", "tradingview", "pine", "risk"]
+    }
+  ]
+}
