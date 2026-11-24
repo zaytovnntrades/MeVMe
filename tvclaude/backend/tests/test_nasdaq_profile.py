@@ -168,3 +168,30 @@ class TestPineTemplate:
         for key in ('"secret"', '"ticker"', '"timeframe"', '"price"', '"indicators"', '"structure"', '"liquidity_sweep"',
                     '"swing_high"', '"volume_avg"', '"macd_hist"', '"asset_class":"future"'):
             assert key in pine, key
+
+
+class TestPineScripts:
+    """Every JSON key a Pine script writes must be one the webhook accepts (it rejects unknown fields)."""
+    ROOT = Path(__file__).parents[2] / "tradingview"
+
+    def allowed(self):
+        from app.schemas import Structure, TradingViewAlert
+        indicators = {"rsi", "ema9", "ema21", "ema50", "vwap", "macd", "macd_signal", "macd_hist", "volume",
+                      "volume_avg", "atr"}
+        fvg_bounds = {"low", "high"}
+        return set(TradingViewAlert.model_fields) | set(Structure.model_fields) | indicators | fvg_bounds
+
+    @pytest.mark.parametrize("script", ["nq_claude_alert.pine", "nq_bullish_strategy.pine"])
+    def test_script_keys_are_accepted_by_the_schema(self, script):
+        import re
+        keys = set(re.findall(r'"([a-z_0-9]+)":', (self.ROOT / script).read_text()))
+        assert {"secret", "ticker", "timeframe", "price", "indicators", "structure"} <= keys
+        assert keys <= self.allowed(), keys - self.allowed()
+
+    def test_bullish_strategy_alert_accepted_and_analysed(self, make_client):
+        fake = FakeAnalyst(make_analysis(**NQ_SETUP))
+        c = make_client(analyst=fake, **PROFILE)
+        r = c.post("/webhook/tradingview", content=json.dumps(payload("pine_bullish_strategy")))
+        assert r.status_code == 202, r.text
+        wait_for(c, r.json()["alert_id"])
+        assert "long 12" in fake.calls[0]["context"]["notes"]

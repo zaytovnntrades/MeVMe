@@ -69,6 +69,14 @@ TradingView only sends webhooks to public HTTPS URLs on port 80 or 443. Put the 
 
    That's everything Claude gets: **it cannot see your chart.** Indicators you don't send are listed for Claude as missing, and it may ask for them in `data_requests`.
 
+**Bullish strategy (backtest + alerts):** `tradingview/nq_bullish_strategy.pine` is a long-only strategy built on the same rules:
+- 15m bias, a sweep or break-of-structure trigger above VWAP with EMA 9 > 21, and a stop 2 ticks under the trigger low
+- skips the trade (gray AVOID label, with the reason on hover) when the next resistance is closer than 2R
+- sizes to $250 using the symbol's own $ per point, and exits in thirds at 2R/3R/5R with breakeven after TP1
+- stops for the day after 2 losses, and flattens at 15:55 ET
+
+Its Strategy Tester results are history, not a forecast. Set your real per-contract commission in Properties first. With "alert() function calls only", each entry sends a tvclaude alert carrying the plan in `notes`.
+
 The secret goes in the JSON body because TradingView can't set headers. The server strips it before storing anything. `tests/payloads/pine_template_nq.json` shows the exact shape the script emits.
 
 ## How Claude is used, and kept honest
@@ -114,7 +122,7 @@ The secret goes in the JSON body because TradingView can't set headers. The serv
 ## Tests
 
 ```bash
-cd backend && .venv/bin/python -m pytest -q        # 131 tests, offline, no API cost
+cd backend && .venv/bin/python -m pytest -q        # 134 tests, offline, no API cost
 RUN_LIVE_CLAUDE_TESTS=1 ANTHROPIC_API_KEY=... .venv/bin/python -m pytest -q -k live   # one real Claude call
 ```
 
