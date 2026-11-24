@@ -7,8 +7,9 @@ Python standard library only. Nothing to install.
 | `grok_client.py` | Talks to the Grok (xAI) API: `models`, `ask`, `respond`, `signal` |
 | `grok_gate.py` | Webhook relay: Grok reviews TradingView **entries** before they reach StrategyFactory |
 | `risk.py` | Risk limits checked in code before Grok: leverage, size, stop-loss, per-trade and daily risk, symbol lists, kill switch |
+| `futures.py` | Nasdaq and other CME index futures through TradersPost: contract specs, contract-based risk, CME hours, reversal safety |
 | `risk.example.json` | Starter limits for a $1,000 account. Copy it to `risk.json` |
-| `test_grok_gate.py`, `test_risk.py` | Offline tests (66): `python3 -m unittest test_grok_gate test_risk -v` |
+| `test_grok_gate.py`, `test_risk.py`, `test_futures.py` | Offline tests (102): `python3 -m unittest test_grok_gate test_risk test_futures -v` |
 
 ## Switching provider: Grok or FreeLLMAPI
 
@@ -59,6 +60,70 @@ TradingView alert ──► grok_gate  /tv/<GATE_TOKEN>
 - **Dry run by default.** Nothing trades until you start it with `GATE_LIVE=1`.
 - `gate_notes` is read by Grok and stripped before forwarding, so StrategyFactory receives exactly what the builder generated.
 - Every decision goes to `gate_log.jsonl`. Credentials are never logged.
+
+## Futures (Nasdaq and other CME index futures)
+
+One gate handles both markets. **The JSON shape decides the route:**
+
+| Alert looks like | Market | Sent to |
+|---|---|---|
+| `{"exchange": "bybit", "coin_pair": ..., "position": ...}` | Crypto perpetuals | StrategyFactory |
+| `{"ticker": ..., "action": ..., "sentiment": ...}` | Futures | TradersPost, which reaches Tradovate, NinjaTrader, TradeStation, IBKR and others |
+
+```bash
+export TRADERSPOST_WEBHOOK_URL="https://webhooks.traderspost.io/trading/webhook/..."   # from your TradersPost strategy; it's a secret
+```
+
+**TradingView alert message** for a strategy. Point the alert at the gate's URL, not at TradersPost:
+
+```json
+{
+  "ticker": "{{ticker}}",
+  "action": "{{strategy.order.action}}",
+  "sentiment": "{{strategy.market_position}}",
+  "prev_market_position": "{{strategy.prev_market_position}}",
+  "quantity": "{{strategy.order.contracts}}",
+  "price": "{{close}}",
+  "time": "{{timenow}}",
+  "stopLoss": {"type": "stop", "stopPrice": "{{plot(\"SL\")}}"},
+  "gate_notes": "RSI {{plot(\"RSI\")}}, VWAP {{plot(\"VWAP\")}}"
+}
+```
+
+The `{{plot("SL")}}` placeholder needs a plot named `SL` in your Pine script, and the same goes for the `gate_notes` plots. Check every field against TradersPost's own docs before going live: the gate forwards this JSON exactly as sent, minus `gate_notes`.
+
+**How the gate reads a futures alert:**
+- **Exits are never blocked:**
+  - `action` is `exit` or `cancel`
+  - `sentiment` is `flat`
+  - a buy or sell against the current sentiment, like `sell` + `long`, which trims a long
+  - anything it doesn't recognise
+- **Entries:** `buy` + `long` and `sell` + `short`. These go through the same chain as crypto: kill switch, duplicate check, precheck, risk limits, daily ledger, then Grok.
+- **Reversal safety:** a blocked entry that was a reversal, where `prev_market_position` is the opposite side, sends `{"ticker": ..., "action": "exit"}` to close the old position. A veto then means "flat", never "stuck in the trade the strategy wanted out of". Without `prev_market_position` the gate can't tell, so keep that field in the alert.
+
+**Contract specs built in** (dollars per 1.00 point): NQ $20, MNQ $2, ES $50, MES $5, YM $5, MYM $0.50, RTY $50, M2K $5. Add others with `futures_point_values`, for example `{"CL": 1000}`. **Trade risk = contracts × stop points × $/point.** A 20-point stop costs $40 on 1 MNQ and $400 on 1 NQ.
+
+**Futures limits in `risk.json`** (a number covers every contract; a dict sets one per contract):
+
+| Key | Blocks an entry when |
+|---|---|
+| `max_contracts` | more contracts, for example `{"MNQ": 2, "MES": 2}` |
+| `max_stop_points` | the stop is wider in points, for example `{"MNQ": 15, "MES": 6}` |
+| `futures_session` | outside CME hours: Sunday 18:00 to Friday 17:00 ET, with a 17:00–18:00 break each day |
+| `no_entry_minutes_before_close` | it's within N minutes of the 17:00 ET close |
+| `futures_point_values` | not a rule: $/point for contracts not built in |
+
+These rules apply to **both markets**: `allowed_symbols` and `blocked_symbols` (use roots like `MNQ`), `require_stop_loss`, `max_risk_usdt` (read as USD), the daily counts and `max_daily_risk_usdt`. **The daily risk budget is shared**, so a crypto loss and a futures loss come out of the same pot. The crypto-only rules (`max_leverage`, `max_margin_usdt`, `max_notional_usdt`, `max_wallet_pct`, `max_stop_loss_pct`) never touch futures. One MNQ contract is worth about $40k notional, which would trip any crypto-sized cap.
+
+**When the gate refuses to guess, it blocks the entry instead:**
+- `stopLoss.amount` (its exact meaning isn't verified here). Use `stopPrice`, or `percent` with `price`.
+- A `quantityType` other than a fixed contract count.
+- No `quantity`, which means TradersPost sizes the order itself.
+- A contract with no known point value.
+
+**Not handled:** CME holidays and early closes. Check the CME calendar or `touch HALT` on those days.
+
+**Known gap on crypto:** a vetoed crypto reversal (`exit_existing_trade:"1"`) leaves the old position open, because StrategyFactory alerts don't carry the previous position. Send separate `close_long` / `close_short` alerts, which the builder makes and the gate never blocks.
 
 ## Risk limits (ported from trader-risk)
 

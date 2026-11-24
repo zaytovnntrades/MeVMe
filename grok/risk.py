@@ -19,6 +19,8 @@ import time
 import uuid
 from pathlib import Path
 
+import futures
+
 # The keys risk.json may contain. Anything else is rejected so a typo can't silently disable a rule.
 LIMIT_KEYS = {
     "account_usdt": "your account size, needed to value %-of-wallet orders in USDT",
@@ -33,8 +35,15 @@ LIMIT_KEYS = {
     "max_risk_usdt": "most one trade may lose if its stop is hit (notional x stop %)",
     "max_entries_per_day": "entries allowed per UTC day",
     "max_entries_per_symbol_per_day": "entries allowed per symbol per UTC day",
-    "max_daily_risk_usdt": "total stop-loss risk allowed across all entries per UTC day",
+    "max_daily_risk_usdt": "total stop-loss risk allowed across all entries per UTC day (crypto + futures)",
+    # futures (TradersPost alerts). Number = every contract, or {"MNQ": 5, "NQ": 1} per contract.
+    "max_contracts": "futures: most contracts one entry may open",
+    "max_stop_points": "futures: widest stop, in index points",
+    "futures_session": "futures: true = no entries outside CME hours (Sun 18:00 to Fri 17:00 ET, 17-18 break)",
+    "no_entry_minutes_before_close": "futures: no entries this many minutes before the 17:00 ET close",
+    "futures_point_values": 'futures: extra or overriding $-per-point, e.g. {"CL": 1000}',
 }
+PER_ROOT_KEYS = {"max_contracts", "max_stop_points", "futures_point_values"}
 SIZING = {"0": "base", "1": "percent", "2": "usdt"}
 
 
@@ -54,7 +63,14 @@ def load_limits(path: str | None) -> dict:
             if not isinstance(v, list):
                 raise ValueError(f"{path}: {k} must be a list")
             limits[k] = [norm_symbol(s) for s in v]
-        elif k == "require_stop_loss":
+        elif k in PER_ROOT_KEYS and isinstance(v, dict):
+            if not v or not all(isinstance(n, (int, float)) and not isinstance(n, bool) and n > 0
+                                for n in v.values()):
+                raise ValueError(f"{path}: {k} values must be numbers greater than 0")
+            limits[k] = {futures.root_symbol(r): n for r, n in v.items()}
+        elif k == "futures_point_values":
+            raise ValueError(f"{path}: {k} must be an object like {{\"CL\": 1000}}")
+        elif k in ("require_stop_loss", "futures_session"):
             if not isinstance(v, bool):
                 raise ValueError(f"{path}: {k} must be true or false")
         elif not isinstance(v, (int, float)) or isinstance(v, bool) or v <= 0:
@@ -66,7 +82,8 @@ def norm_symbol(s) -> str:
     """BTCUSDT.P, btcusdt, BYBIT:BTCUSDT.P -> BTCUSDT, so lists match however TradingView spells it."""
     s = str(s).strip().upper()
     s = s.split(":")[-1]
-    return s[:-2] if s.endswith(".P") else s
+    s = s[:-2] if s.endswith(".P") else s
+    return futures.root_symbol(s)  # MNQ1! / MNQZ26 -> MNQ; crypto symbols pass through
 
 
 def _num(v) -> float | None:
@@ -78,6 +95,13 @@ def _num(v) -> float | None:
 
 
 def measure(payload: dict, limits: dict) -> dict:
+    """Crypto (StrategyFactory) or futures (TradersPost) entry -> the numbers the rules need."""
+    if futures.is_traderspost(payload):
+        return futures.measure(payload, limits)
+    return measure_crypto(payload, limits)
+
+
+def measure_crypto(payload: dict, limits: dict) -> dict:
     """Work out leverage, margin, notional, stop % and USDT risk from a StrategyFactory entry.
     Fields that can't be worked out are None (and the rules that need them say so)."""
     side_lev = payload.get("buy_leverage") if str(payload.get("position")) == "0" else payload.get("sell_leverage")
@@ -108,13 +132,15 @@ def measure(payload: dict, limits: dict) -> dict:
         elif price:
             sl_pct = abs(price - sl_raw) / price * 100
     risk = notional * sl_pct / 100 if notional is not None and sl_pct is not None else None
-    return {"symbol": norm_symbol(payload.get("coin_pair", "")), "sizing": sizing, "leverage": lev,
+    return {"market": "crypto", "symbol": norm_symbol(payload.get("coin_pair", "")), "sizing": sizing, "leverage": lev,
             "margin_usdt": margin, "wallet_pct": wallet_pct, "notional_usdt": notional,
             "has_stop_loss": has_sl, "stop_loss_pct": sl_pct, "risk_usdt": risk}
 
 
-def check_static(m: dict, limits: dict) -> list[str]:
+def check_static(m: dict, limits: dict, now: float | None = None) -> list[str]:
     """Rules that depend on this one entry only."""
+    if m.get("market") == "futures":
+        return futures.check_static(m, limits, time.time() if now is None else now)
     r = []
     sym = m["symbol"]
     if sym in limits.get("blocked_symbols", []):
