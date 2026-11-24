@@ -27,7 +27,15 @@ export interface RiskReport {
 export interface Account {
   starting_balance: number | null; drawdown_limit: number | null; mode: string; realized_pnl: number;
   equity: number | null; peak_equity: number | null; open_risk: number; drawdown_used: number;
-  remaining: number | null; breached: boolean;
+  remaining: number | null; breached: boolean; lock_above_start: number | null; peak_eod_balance: number | null;
+  floor_balance: number | null; floor_locked: boolean; trading_day: string; today_pnl: number;
+  today_closed: number; losing_streak_today: number;
+}
+
+export interface Shield {
+  halted: boolean; halt_reason: string | null; phase: string; entry_window: string | null;
+  daily_loss_limit: number | null; max_consecutive_losses: number | null;
+  new_setups_allowed_now: boolean; would_block: string[]; warnings: string[];
 }
 
 export interface Analysis {
@@ -47,7 +55,7 @@ export interface JournalEntry {
 
 export interface Status {
   mode: string; broker_execution: string; database: string; redis: string;
-  anthropic: { model: string; effort: string; api_key_set: boolean }; telegram: string;
+  anthropic: { model: string; effort: string; api_key_set: boolean }; telegram: string; discord: string; shield: Shield;
   queue_depth: number; workers_running: number; account: Account;
   instruments: { asset_classes: string[] | "all"; futures_roots: string[] | "all" };
   risk: { account_balance_set: boolean; risk_per_trade: number | null; risk_percent: number; allowed: number[];

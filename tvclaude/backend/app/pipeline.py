@@ -1,15 +1,16 @@
 """Background workflow for one alert:
-Claude analysis -> guard -> risk manager -> save -> dashboard update -> Telegram."""
+Shield precheck -> Claude analysis -> guard -> risk manager -> save -> dashboard -> Telegram + Discord."""
 import asyncio
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 
-from . import account, strategies
+from . import account, shield, strategies
 from .analyst import AnalysisError, guard
 from .config import Settings
 from .db import Alert, Analysis, Database
-from .infra import Hub, Telegram, format_telegram
-from .risk import RiskInputs, RiskManager
+from .infra import Hub, Notifier, format_shield, format_telegram
+from .risk import RiskInputs, RiskManager, RiskReport
 from .schemas import AssetClass
 from .serialize import analysis_dict, iso
 
@@ -25,7 +26,21 @@ class Services:
     risk: RiskManager
     queue: object
     hub: Hub
-    telegram: Telegram
+    notifier: Notifier
+    shield_notified: set = field(default_factory=set)   # (trading day, block kind) already announced
+    clock: object = None                                  # tests can freeze time; default = now in UTC
+
+    def now(self) -> datetime:
+        return self.clock() if self.clock else datetime.now(timezone.utc)
+
+    def account_state(self) -> account.AccountState:
+        st = self.settings
+        return account.load(self.db, st.account_balance, st.drawdown_limit, st.drawdown_mode,
+                            st.drawdown_lock_above_start, self.now())
+
+    def risk_per_trade(self) -> float | None:
+        st = self.settings
+        return st.account_balance * st.risk_percent / 100 if st.account_balance else None
 
 
 def claude_context(alert: Alert) -> dict:
@@ -71,6 +86,27 @@ async def process(alert_id: int, s: Services) -> Analysis:
     missing = module.missing_inputs(payload.get("indicators") or {}, bool(payload.get("structure")),
                                     "volume" in (payload.get("indicators") or {}))
     row = Analysis(alert_id=alert_id, decision="WAIT", warnings=[])
+
+    # Shield first: a blocked alert never reaches Claude.
+    acct = await asyncio.to_thread(s.account_state)
+    halt = await asyncio.to_thread(shield.get_halt, s.db)
+    blocks = shield.precheck(now=s.now(), halted=halt.halted, halt_reason=halt.reason, acct=acct,
+                             risk_per_trade=s.risk_per_trade(), entry_window=s.settings.entry_window,
+                             daily_loss_limit=s.settings.daily_loss_limit,
+                             max_consecutive_losses=s.settings.max_consecutive_losses)
+    if blocks:
+        rep = RiskReport(verdict="REJECTED", reasons=[b.reason for b in blocks],
+                         drawdown_remaining=acct.remaining)
+        row.decision, row.risk = "AVOID", rep.to_dict()
+        row.warnings = ["Shield blocked this alert before analysis: " + "; ".join(b.reason for b in blocks)]
+        saved = await asyncio.to_thread(_save, s.db, row, "blocked")
+        await s.hub.broadcast("analysis_completed", analysis_dict(saved, alert))
+        fresh = [b for b in blocks if (acct.trading_day, b.kind) not in s.shield_notified]
+        if fresh and s.notifier.enabled:
+            s.shield_notified.update((acct.trading_day, b.kind) for b in fresh)
+            await s.notifier.send(format_shield(alert.ticker, alert.timeframe, fresh))
+        return saved
+
     try:
         raw, meta = await s.analyst.analyze(claude_context(alert), module, s.settings.min_reward_risk, missing,
                                             rules=account_rules(s.settings))
@@ -87,8 +123,6 @@ async def process(alert_id: int, s: Services) -> Analysis:
         side = side_for(a.decision, a.market_bias)
         if side and a.entry_zone and a.stop_loss is not None:
             opt = payload.get("option") or {}
-            acct = await asyncio.to_thread(account.load, s.db, s.settings.account_balance,
-                                           s.settings.drawdown_limit, s.settings.drawdown_mode)
             rep = s.risk.evaluate(RiskInputs(
                 side=side, entry=list(a.entry_zone), stop_loss=a.stop_loss, take_profit=list(a.take_profit),
                 asset_class=AssetClass(alert.asset_class), symbol=alert.ticker,
@@ -120,8 +154,8 @@ async def process(alert_id: int, s: Services) -> Analysis:
     saved = await asyncio.to_thread(_save, s.db, row, status)
     data = analysis_dict(saved, alert)
     await s.hub.broadcast("analysis_completed" if status == "analyzed" else "analysis_failed", data)
-    if status == "analyzed" and saved.decision in s.settings.notify_decisions and s.telegram.enabled:
-        await s.telegram.send(format_telegram(saved.result, saved.risk))
+    if status == "analyzed" and saved.decision in s.settings.notify_decisions and s.notifier.enabled:
+        await s.notifier.send(format_telegram(saved.result, saved.risk))
     return saved
 
 

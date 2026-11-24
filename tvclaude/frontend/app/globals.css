@@ -131,3 +131,9 @@ table.data tr.click:hover td { background: var(--panel-2); }
 .ddbar strong { font-size: 14px; }
 .ddtrack { flex: 0 1 220px; min-width: 120px; height: 6px; border-radius: 3px; background: var(--panel-2); overflow: hidden; display: inline-block; }
 .ddtrack span { display: block; height: 100%; border-radius: 3px; transition: width 0.4s ease; }
+
+/* ---------- kill switch ---------- */
+.btn.kill { border-color: rgba(239, 68, 68, 0.5); color: var(--bear); }
+.btn.kill:hover { background: var(--bear-bg); border-color: var(--bear); }
+.btn.killon { background: var(--bear); border-color: var(--bear); color: #fff; animation: pulse 1.6s ease-in-out infinite; }
+@keyframes pulse { 50% { opacity: 0.75; } }

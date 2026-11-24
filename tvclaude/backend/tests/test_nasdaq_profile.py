@@ -114,8 +114,10 @@ class TestDrawdown:
             c.patch(f"/api/journal/{j['id']}", headers=AUTH, json={"status": "closed", "exit_price": 20975})
         acct = c.get("/api/account", headers=AUTH).json()
         assert acct["realized_pnl"] == -750.0 and acct["remaining"] == 250.0
-        an = wait_for(c, send(c, price=21000.0).json()["alert_id"])["analyses"][-1]
-        assert an["decision"] == "AVOID" and "drawdown limit" in an["risk"]["reasons"][0]
+        a = wait_for(c, send(c, price=21000.0).json()["alert_id"])
+        an = a["analyses"][-1]
+        assert a["status"] == "blocked" and an["decision"] == "AVOID"
+        assert "drawdown floor" in an["risk"]["reasons"][0] and an["claude_decision"] is None
 
     def test_manual_journal_uses_contract_multiplier(self, make_client):
         c = client(make_client)

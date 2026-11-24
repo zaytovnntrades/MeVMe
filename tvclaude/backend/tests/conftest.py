@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 
 from app.analyst import AnalysisError, AnalysisMeta
 from app.config import Settings
-from app.infra import Telegram
+from app.infra import Discord, Telegram
 from app.main import create_app
 from app.schemas import ClaudeAnalysis
 
@@ -70,9 +70,9 @@ def make_settings(tmp_path, **kw) -> Settings:
 def make_client(tmp_path):
     clients = []
 
-    def _make(analyst=None, telegram=None, **settings_kw):
+    def _make(analyst=None, telegram=None, discord=None, clock=None, **settings_kw):
         app = create_app(make_settings(tmp_path, **settings_kw), analyst=analyst or FakeAnalyst(),
-                         telegram=telegram or Telegram(None, None))
+                         telegram=telegram or Telegram(None, None), discord=discord or Discord(None), clock=clock)
         c = TestClient(app)
         c.__enter__()
         clients.append(c)
@@ -87,7 +87,7 @@ def wait_for(client, alert_id: int, timeout: float = 5.0) -> dict:
     end = time.time() + timeout
     while time.time() < end:
         a = client.get(f"/api/alerts/{alert_id}", headers=AUTH).json()
-        if a["status"] in ("analyzed", "failed"):
+        if a["status"] in ("analyzed", "failed", "blocked"):
             return a
         time.sleep(0.02)
     raise AssertionError(f"alert {alert_id} not processed in {timeout}s")

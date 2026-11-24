@@ -25,6 +25,8 @@ export function AnalysisView({ analysis, pending, onJournal }:
   const r = analysis.result;
   const risk = analysis.risk;
   const overridden = analysis.claude_decision && analysis.claude_decision !== analysis.decision;
+  // Shield blocked it before Claude: no plan exists, so there's nothing to size or measure.
+  const shieldBlock = !!risk && risk.stop_distance === null && !analysis.claude_decision && !analysis.error;
 
   return (
     <Panel title="Claude analysis" right={<span className="foot num">
@@ -78,9 +80,13 @@ export function AnalysisView({ analysis, pending, onJournal }:
         {risk && (
           <div style={{ marginTop: 12 }}>
             <div className="hero" style={{ gap: 8 }}>
-              <h4 style={{ margin: 0, fontSize: 11, letterSpacing: "0.08em", color: "var(--muted)" }}>RISK MANAGER</h4>
-              <span className={decisionClass(risk.verdict)}>{risk.verdict}</span>
+              <h4 style={{ margin: 0, fontSize: 11, letterSpacing: "0.08em", color: "var(--muted)" }}>{shieldBlock ? "SHIELD" : "RISK MANAGER"}</h4>
+              <span className={decisionClass(risk.verdict)}>{shieldBlock ? "BLOCKED" : risk.verdict}</span>
             </div>
+            {shieldBlock ? (
+              <div className="foot">No trade was planned, sized or analysed.
+                {risk.drawdown_remaining !== null ? ` Drawdown left: ${fmt(risk.drawdown_remaining)}.` : ""}</div>
+            ) : <>
             <table className="levels num">
               <tbody>
                 <tr><td>Size</td><td>{risk.verdict === "REJECTED" ? "— (rejected: no position)"
@@ -95,6 +101,7 @@ export function AnalysisView({ analysis, pending, onJournal }:
               </tbody>
             </table>
             {[...risk.reasons, ...risk.notes].map((x, i) => <div className="foot" key={i}>• {x}</div>)}
+            </>}
           </div>
         )}
 

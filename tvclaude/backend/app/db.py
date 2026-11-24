@@ -73,6 +73,15 @@ class JournalEntry(Base):
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
+class ShieldState(Base):
+    """Kill switch. One row. While halted, every new alert is recorded but blocked before analysis."""
+    __tablename__ = "shield_state"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    halted: Mapped[bool] = mapped_column(default=False)
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class Database:
     def __init__(self, url: str):
         kwargs = {"connect_args": {"check_same_thread": False}} if url.startswith("sqlite") else {"pool_pre_ping": True}

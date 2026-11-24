@@ -41,7 +41,14 @@ class Settings(BaseSettings):
 
     # --- account drawdown (prop-firm style) -----------------------------------------------
     drawdown_limit: float | None = None      # e.g. 1000: total loss that ends the account
-    drawdown_mode: str = "static"            # static: from the starting balance | trailing: from peak
+    drawdown_mode: str = "static"            # static | trailing (closed-trade peak) | eod_trailing (MFF-style)
+    drawdown_lock_above_start: float | None = None   # trailing floor stops at start + this (MFF Builder: 100)
+    account_phase: str = "evaluation"        # evaluation | funded (funded rules can be stricter: re-check them)
+
+    # --- Shield: daily stop, session, kill switch -------------------------------------------
+    daily_loss_limit: float | None = None    # e.g. 500: no new setups once one more loss would pass this
+    max_consecutive_losses: int | None = None  # e.g. 2: done for the day after this many full losses in a row
+    entry_window: str | None = None          # e.g. "09:35-11:30" New York time, Mon-Fri; empty = always
 
     # --- what the system trades -----------------------------------------------------------
     allowed_asset_classes: list[str] = []    # empty = all; e.g. ["future"]
@@ -50,6 +57,7 @@ class Settings(BaseSettings):
     # --- notifications ----------------------------------------------------------------------
     telegram_bot_token: str | None = None
     telegram_chat_id: str | None = None
+    discord_webhook_url: str | None = None   # Channel settings > Integrations > Webhooks > Copy URL
     notify_decisions: list[str] = ["LONG_SETUP", "SHORT_SETUP"]
 
     # --- execution --------------------------------------------------------------------------
@@ -62,11 +70,33 @@ class Settings(BaseSettings):
             raise ValueError("analysis_effort must be low|medium|high|xhigh|max")
         return v
 
+    @field_validator("account_phase")
+    @classmethod
+    def _phase(cls, v: str) -> str:
+        if v not in ("evaluation", "funded"):
+            raise ValueError("account_phase must be evaluation or funded")
+        return v
+
+    @field_validator("entry_window")
+    @classmethod
+    def _window(cls, v: str | None) -> str | None:
+        if v:
+            from .shield import parse_window
+            parse_window(v)
+        return v
+
+    @field_validator("discord_webhook_url")
+    @classmethod
+    def _discord(cls, v: str | None) -> str | None:
+        if v and not v.startswith(("https://discord.com/api/webhooks/", "https://discordapp.com/api/webhooks/")):
+            raise ValueError("discord_webhook_url must be a Discord webhook URL (https://discord.com/api/webhooks/...)")
+        return v
+
     @field_validator("drawdown_mode")
     @classmethod
     def _dd_mode(cls, v: str) -> str:
-        if v not in ("static", "trailing"):
-            raise ValueError("drawdown_mode must be static or trailing")
+        if v not in ("static", "trailing", "eod_trailing"):
+            raise ValueError("drawdown_mode must be static, trailing or eod_trailing")
         return v
 
     @field_validator("allowed_futures_roots")

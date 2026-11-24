@@ -5,7 +5,7 @@ import { DecisionChip, Panel, timeAgo } from "@/components/bits";
 import { RiskCalculator } from "@/components/RiskCalculator";
 import { History, Journal, PerformancePanel } from "@/components/Tables";
 import { api, ApiError, fmt, getToken, setToken, wsUrl } from "@/lib/api";
-import type { Alert, Analysis, JournalEntry, Performance, Status } from "@/lib/types";
+import type { Alert, Analysis, JournalEntry, Performance, Shield, Status } from "@/lib/types";
 
 type WsState = "connecting" | "live" | "down";
 
@@ -78,6 +78,8 @@ export default function Page() {
           setAlerts((xs) => [data as Alert, ...xs].slice(0, 200));
           setFresh((f) => new Set(f).add(data.id));
           setSelected((cur) => cur ?? data.id);
+        } else if (event === "shield_changed") {
+          setStatus((cur) => (cur ? { ...cur, shield: data as Shield } : cur));
         } else if (event === "analysis_started") {
           setAlerts((xs) => xs.map((a) => (a.id === data.alert_id ? { ...a, status: "analyzing" } : a)));
         } else if (event === "analysis_completed" || event === "analysis_failed") {
@@ -109,6 +111,21 @@ export default function Page() {
   const current = selected !== null ? byAlert.get(selected) ?? null : null;
   const currentAlert = alerts.find((a) => a.id === selected);
 
+  async function halt() {
+    const reason = window.prompt("Kill switch: why are you stopping? (optional)") ?? undefined;
+    if (reason === undefined) return;          // cancelled
+    try {
+      const sh = await api<Shield>("/api/shield/halt", { method: "POST", body: JSON.stringify({ reason: reason || null }) });
+      setStatus((cur) => (cur ? { ...cur, shield: sh } : cur));
+    } catch (e) { window.alert((e as Error).message); }
+  }
+
+  async function resume() {
+    if (!window.confirm("Resume? New alerts will be analysed again.")) return;
+    try { const sh = await api<Shield>("/api/shield/resume", { method: "POST" }); setStatus((cur) => (cur ? { ...cur, shield: sh } : cur)); }
+    catch (e) { window.alert((e as Error).message); }
+  }
+
   async function addToJournal(a: Analysis) {
     try {
       await api("/api/journal", { method: "POST", body: JSON.stringify({ analysis_id: a.id }) });
@@ -133,7 +150,11 @@ export default function Page() {
           <Pill label={`Redis ${s?.redis ?? ""}`} state={s?.redis === "ok" ? "ok" : s?.redis === "disabled" ? "off" : "bad"} />
           <Pill label={`Claude ${s?.anthropic.model ?? ""}`} state={s?.anthropic.api_key_set ? "ok" : "warn"} />
           <Pill label={`Telegram ${s?.telegram ?? ""}`} state={s?.telegram === "configured" ? "ok" : "off"} />
+          <Pill label={`Discord ${s?.discord ?? ""}`} state={s?.discord === "configured" ? "ok" : "off"} />
           <Pill label={`Queue ${s?.queue_depth ?? 0} · workers ${s?.workers_running ?? 0}`} state={(s?.workers_running ?? 0) > 0 ? "ok" : "bad"} />
+          {s && (s.shield.halted
+            ? <button className="btn small killon" onClick={resume}>Kill switch ON · Resume</button>
+            : <button className="btn small kill" onClick={halt}>Kill switch</button>)}
           <button className="linkbtn" onClick={() => { setToken(null); setAuthed(false); }}>Sign out</button>
         </div>
       </div>
@@ -149,6 +170,21 @@ export default function Page() {
             <span className="num">P&L {fmt(a.realized_pnl)} · open risk {fmt(a.open_risk)} · {fmt(s.risk.risk_per_trade)}/trade
               {" · "}{left > 0 && s.risk.risk_per_trade ? `${Math.floor(left / s.risk.risk_per_trade)} full losses left` : "no new trades"}</span>
             <span className="num">{Array.isArray(s.instruments.futures_roots) ? s.instruments.futures_roots.join(" / ") : "all"} · TP1 ≥ {s.risk.min_reward_risk}R{s.risk.target_ladder.length ? ` · ladder ${s.risk.target_ladder.join("/")}R` : ""}</span>
+            {a.floor_balance != null && <span className="num">Floor {fmt(a.floor_balance)}{a.floor_locked ? " (locked)" : ""} · {s.shield.phase}</span>}
+          </div>);
+      })()}
+
+      {s && (() => {
+        const sh = s.shield, a = s.account;
+        const tone = sh.halted || !sh.new_setups_allowed_now ? "var(--bear)" : "var(--bull)";
+        return (
+          <div className="ddbar">
+            <span>Shield <strong style={{ color: tone }}>{sh.halted ? "HALTED" : sh.new_setups_allowed_now ? "open for setups" : "blocking new setups"}</strong></span>
+            <span className="num">Today ({a.trading_day}): P&L {fmt(a.today_pnl)}{sh.daily_loss_limit ? ` of −${fmt(sh.daily_loss_limit)} limit` : ""}
+              {" · "}losses in a row {a.losing_streak_today}{sh.max_consecutive_losses ? `/${sh.max_consecutive_losses}` : ""}</span>
+            {sh.entry_window && <span className="num">Entry window {sh.entry_window} ET</span>}
+            {sh.would_block.length > 0 && <span style={{ color: "var(--bear)" }}>{sh.would_block.join(" · ")}</span>}
+            {sh.warnings.map((w, i) => <span key={i} style={{ color: "var(--wait)" }}>{w}</span>)}
           </div>);
       })()}
 

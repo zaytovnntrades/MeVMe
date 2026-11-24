@@ -137,6 +137,48 @@ class Telegram:
             return False
 
 
+class Discord:
+    """Posts to a Discord channel webhook. The URL is a secret: it is never logged."""
+
+    def __init__(self, webhook_url: str | None, transport: httpx.AsyncBaseTransport | None = None):
+        self.url, self.transport = webhook_url, transport
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.url)
+
+    async def send(self, text: str) -> bool:
+        if not self.enabled:
+            return False
+        try:
+            async with httpx.AsyncClient(timeout=10, transport=self.transport) as c:
+                r = await c.post(self.url, json={"content": text[:1990], "allowed_mentions": {"parse": []}})
+            if r.status_code not in (200, 204):
+                log.warning("discord returned HTTP %s", r.status_code)
+                return False
+            return True
+        except httpx.HTTPError as e:
+            log.warning("discord send failed: %s", type(e).__name__)
+            return False
+
+
+class Notifier:
+    """Sends every message to every configured channel. One failing channel never blocks the others."""
+
+    def __init__(self, *channels):
+        self.channels = [c for c in channels if c is not None]
+
+    @property
+    def enabled(self) -> bool:
+        return any(c.enabled for c in self.channels)
+
+    def status(self) -> dict:
+        return {type(c).__name__.lower(): ("configured" if c.enabled else "off") for c in self.channels}
+
+    async def send(self, text: str) -> dict:
+        return {type(c).__name__.lower(): await c.send(text) for c in self.channels if c.enabled}
+
+
 def format_telegram(analysis: dict, risk: dict | None) -> str:
     a = analysis
     lines = [f"[PAPER] {a['symbol']} {a['timeframe']} ({a['strategy']}) - {a['decision']}",
@@ -149,4 +191,11 @@ def format_telegram(analysis: dict, risk: dict | None) -> str:
                      (f" | size {risk['quantity']} {risk['unit']}, max loss {risk['max_loss']}" if risk.get("quantity") else ""))
     lines.append(f"Invalidation: {a['invalidation']}")
     lines.append("Analysis only - not financial advice. No order was placed.")
+    return "\n".join(lines)
+
+
+def format_shield(symbol: str, timeframe: str, blocks) -> str:
+    lines = [f"[SHIELD] Blocked {symbol} {timeframe} alert. Claude was not called and no trade was proposed."]
+    lines += [f"- {b.reason}" for b in blocks]
+    lines.append("Paper trading only. Nothing was sent to a broker.")
     return "\n".join(lines)

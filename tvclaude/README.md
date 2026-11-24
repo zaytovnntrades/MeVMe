@@ -39,6 +39,27 @@ worker: Claude (strict JSON schema) → guard (no invented prices) → risk mana
 
 Set whichever your firm uses. The dashboard's top bar shows the buffer left and how many full losses it still allows.
 
+## Shield: what can stop a trade
+
+Shield runs **before** Claude, so a blocked alert costs no API call. It runs again inside the risk manager for each proposed trade. Each block is recorded with its reason, shown on the dashboard, and announced **once per reason per day** on Telegram and Discord.
+
+| Rule | Setting (your values) | Blocks a new setup when |
+|---|---|---|
+| **Kill switch** | dashboard button or `POST /api/shield/halt` | it's on. It survives restarts and stays on until you press Resume |
+| **Entry window** | `ENTRY_WINDOW=09:35-11:30` (New York, Mon–Fri) | an alert arrives outside it |
+| **Daily stop** | `DAILY_LOSS_LIMIT=500` | one more full loss would take today past −$500 |
+| **Losing streak** | `MAX_CONSECUTIVE_LOSSES=2` | 2 full losses in a row today (a close at −0.5R or worse counts as a loss) |
+| **Drawdown** | `DRAWDOWN_LIMIT=1000`, `DRAWDOWN_MODE=eod_trailing`, `DRAWDOWN_LOCK_ABOVE_START=100` | the floor is breached, or one more full loss would reach it |
+
+**MyFundedFutures-style end-of-day trailing drawdown:**
+- **The floor** is your highest **end-of-day** balance minus $1,000. It moves only after a trading day closes; today's swings never move it.
+- **The lock:** once the floor reaches the starting balance + $100 ($25,100), it stops trailing.
+- **Trading days** follow CME and roll at **17:00 New York**, so a trade closed at 17:30 ET counts for the next day.
+
+That rule comes from MFF's help center for the Builder 25K plan. **Confirm the exact numbers for your Rapid 25K plan** on your dashboard. If you're funded, set `ACCOUNT_PHASE=funded` and check the funded drawdown rule: some sources say it becomes **intraday** trailing, counting open profit. The dashboard warns about this when `funded` is combined with `eod_trailing`.
+
+**Messages:** set `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` and/or `DISCORD_WEBHOOK_URL`. Every message goes to every configured channel, one failing channel never blocks the other, and secrets are never logged.
+
 ## Run it
 
 ```bash
@@ -134,7 +155,7 @@ The secret goes in the JSON body because TradingView can't set headers. The serv
 ## Tests
 
 ```bash
-cd backend && .venv/bin/python -m pytest -q        # 139 tests, offline, no API cost
+cd backend && .venv/bin/python -m pytest -q        # 174 tests, offline, no API cost
 RUN_LIVE_CLAUDE_TESTS=1 ANTHROPIC_API_KEY=... .venv/bin/python -m pytest -q -k live   # one real Claude call
 ```
 
