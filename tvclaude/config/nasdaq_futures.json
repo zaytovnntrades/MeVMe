@@ -1,0 +1,7 @@
+{
+  "_comment": "CME Nasdaq-100 futures. NQ (E-mini) = $20 per index point, MNQ (Micro) = $2 per point, tick 0.25. Verify against CME/your broker before trading. 'micro'/'full' lets the sizer mix whole NQ with MNQ.",
+  "futures": {
+    "NQ":  {"multiplier": 20, "tick_size": 0.25, "micro": "MNQ"},
+    "MNQ": {"multiplier": 2,  "tick_size": 0.25, "full": "NQ"}
+  }
+}

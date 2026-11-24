@@ -1,0 +1,2 @@
+{"secret": "REPLACE_WITH_WEBHOOK_SECRET", "ticker": "TSLA", "timeframe": "5", "signal": "rsi_cross",
+ "indicators": {"rsi": 52.0}}

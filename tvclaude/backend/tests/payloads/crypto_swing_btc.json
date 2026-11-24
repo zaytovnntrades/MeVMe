@@ -1,0 +1,12 @@
+{
+  "secret": "REPLACE_WITH_WEBHOOK_SECRET",
+  "ticker": "BYBIT:BTCUSDT.P",
+  "timeframe": "240",
+  "signal": "trend_continuation",
+  "price": 97250.0,
+  "indicators": {"rsi": 58.0, "ema21": 95800.0, "ema50": 93900.0, "macd": 620.0, "macd_signal": 480.0,
+                 "macd_hist": 140.0, "volume": 18200.0},
+  "structure": {"support": [95000.0, 92500.0], "resistance": [100000.0, 104000.0], "trend": "up",
+                "swing_low": 94800.0},
+  "notes": "Illustrative values only."
+}

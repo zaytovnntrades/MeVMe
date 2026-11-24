@@ -1,0 +1,51 @@
+# Analysis-only, paper-trading stack. Copy .env.example to .env and fill it in first.
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: tvclaude
+      POSTGRES_USER: tvclaude
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tvclaude -d tvclaude"]
+      interval: 5s
+      retries: 10
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes: [redisdata:/data]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      retries: 10
+    restart: unless-stopped
+
+  api:
+    build: ./backend
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://tvclaude:${POSTGRES_PASSWORD}@db:5432/tvclaude
+      REDIS_URL: redis://redis:6379/0
+      CONTRACT_SPECS_FILE: /config/nasdaq_futures.json
+    volumes: [./config:/config:ro]
+    ports: ["8000:8000"]
+    depends_on:
+      db: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    restart: unless-stopped
+
+  web:
+    build:
+      context: ./frontend
+      args:
+        NEXT_PUBLIC_API_URL: ${PUBLIC_API_URL:-http://localhost:8000}
+    ports: ["3000:3000"]
+    depends_on: [api]
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  redisdata:
