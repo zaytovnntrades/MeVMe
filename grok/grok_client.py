@@ -10,6 +10,7 @@ Usage:
     python3 grok_client.py models                       # list models your key can use
     python3 grok_client.py ask "Explain funding rates"  # one question
     python3 grok_client.py ask "..." --stream           # print tokens as they arrive
+    python3 grok_client.py respond "Fix this function..." # /v1/responses endpoint
     python3 grok_client.py signal BTCUSDT 97250 "RSI 72, price above 200 EMA"
                                                         # structured JSON trade read
 
@@ -23,7 +24,7 @@ import urllib.error
 import urllib.request
 
 BASE_URL = "https://api.x.ai/v1"
-DEFAULT_MODEL = os.environ.get("XAI_MODEL", "grok-4")  # run `models` to see current names
+DEFAULT_MODEL = os.environ.get("XAI_MODEL", "grok-4.7")  # run `models` to see current names
 
 
 def _key() -> str:
@@ -83,6 +84,19 @@ def chat_stream(messages: list[dict], model: str = DEFAULT_MODEL) -> str:
     return "".join(full)
 
 
+def respond(prompt: str, model: str = DEFAULT_MODEL) -> str:
+    """POST /v1/responses - the newer single-input endpoint (`input` instead of `messages`)."""
+    data = _request("POST", "/responses", {"model": model, "input": prompt})
+    if data.get("output_text"):
+        return data["output_text"]
+    parts = []
+    for item in data.get("output", []):
+        for c in item.get("content", []) or []:
+            if c.get("type") in ("output_text", "text") and c.get("text"):
+                parts.append(c["text"])
+    return "\n".join(parts) or json.dumps(data, indent=2)
+
+
 SIGNAL_SYSTEM = (
     "You are a disciplined crypto trading analyst. Given a symbol, price and "
     "indicator notes, reply ONLY with JSON: "
@@ -109,6 +123,8 @@ def main() -> None:
     a = sub.add_parser("ask")
     a.add_argument("prompt")
     a.add_argument("--stream", action="store_true")
+    r = sub.add_parser("respond", help="use the /v1/responses endpoint")
+    r.add_argument("prompt")
     s = sub.add_parser("signal")
     s.add_argument("symbol")
     s.add_argument("price")
@@ -123,6 +139,8 @@ def main() -> None:
             chat_stream(msgs, args.model)
         else:
             print(chat(msgs, args.model))
+    elif args.cmd == "respond":
+        print(respond(args.prompt, args.model))
     elif args.cmd == "signal":
         print(json.dumps(trade_signal(args.symbol, args.price, args.notes, args.model), indent=2))
 
