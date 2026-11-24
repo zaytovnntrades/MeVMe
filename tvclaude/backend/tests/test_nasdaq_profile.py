@@ -181,7 +181,8 @@ class TestPineScripts:
         fvg_bounds = {"low", "high"}
         return set(TradingViewAlert.model_fields) | set(Structure.model_fields) | indicators | fvg_bounds
 
-    @pytest.mark.parametrize("script", ["nq_claude_alert.pine", "nq_bullish_strategy.pine", "nq_bearish_strategy.pine"])
+    @pytest.mark.parametrize("script", ["nq_claude_alert.pine", "nq_bullish_strategy.pine", "nq_bearish_strategy.pine",
+                                        "nq_setups_strategy.pine"])
     def test_script_keys_are_accepted_by_the_schema(self, script):
         import re
         keys = set(re.findall(r'"([a-z_0-9]+)":', (self.ROOT / script).read_text()))
@@ -215,3 +216,17 @@ class TestPineScripts:
             assert long_only not in bear, long_only
         for short_only in ("strategy.short", "close - tp1R", "high + bufTicks", "ta.crossunder", "position_size < 0"):
             assert short_only in bear and short_only not in bull, short_only
+
+    def test_combined_script_shares_one_risk_budget(self):
+        import re
+        src = (self.ROOT / "nq_setups_strategy.pine").read_text()
+        assert "strategy.long" in src and "strategy.short" in src
+        assert len(re.findall(r"var int\s+lossesToday", src)) == 1          # ONE daily loss counter
+        assert "strategy.position_size == 0" in src                          # one position at a time
+        assert "position_size[1] != 0" in src                                # a close of either side counts
+        assert '"bullish_setup"' in src and '"bearish_setup"' in src
+        assert 'options = ["Both", "Long only", "Short only"]' in src
+        # each side's math matches its stand-alone script
+        for piece in ("low - bufTicks", "high + bufTicks", "ta.crossover(close, swingHigh)", "ta.crossunder(close, swingLow)",
+                      "math.min(a, b)", "math.max(a, b)", "close + dir * tp1R * rPts"):
+            assert piece in src, piece

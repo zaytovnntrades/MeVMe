@@ -1,0 +1,259 @@
+//@version=6
+// NQ / MNQ setups, both directions in ONE strategy with ONE risk budget.
+// Long:  15m bias above VWAP (EMA 21 > 50) + sweep of a swing low or close above a swing high, above VWAP, EMA 9 > 21.
+// Short: 15m bias below VWAP (EMA 21 < 50) + sweep of a swing high or close below a swing low, below VWAP, EMA 9 < 21.
+// Both:  stop 2 ticks beyond the trigger candle, 2R room to the next level or AVOID, sized to a fixed dollar risk,
+//        exits in thirds at 2R / 3R / 5R, breakeven after TP1, one shared 2-loss daily stop, flat before the close.
+//
+// Use: add to an MNQ1! or NQ1! 5-minute chart; the Strategy Tester shows how these rules did on history.
+// Alerts (optional): one alert on this strategy, "alert() function calls only", your tvclaude webhook URL;
+// each entry sends a tvclaude JSON alert for analysis. Nothing here places live orders.
+// Backtests are not predictions. Set your broker's per-contract commission in Properties (0 here, never invented).
+strategy("NQ Setups, Long + Short (1:2 ladder)", shorttitle = "NQ Setups", overlay = true,
+     initial_capital = 25000, currency = currency.USD, pyramiding = 0,
+     default_qty_type = strategy.fixed, default_qty_value = 1, slippage = 1,
+     commission_type = strategy.commission.cash_per_contract, commission_value = 0,
+     max_labels_count = 300)
+
+// ---------------------------------------------------------------- inputs
+dirMode   = input.string("Both", "Directions", options = ["Both", "Long only", "Short only"])
+
+grpRisk   = "Risk (shared by both directions)"
+riskUsd   = input.float(250, "Risk per trade ($)", minval = 1, group = grpRisk)
+minR      = input.float(2.0, "Minimum room to the next level (R)", minval = 1, group = grpRisk)
+tp1R      = input.float(2.0, "TP1 (R)", minval = 0.5, group = grpRisk)
+tp2R      = input.float(3.0, "TP2 (R)", minval = 0.5, group = grpRisk)
+tp3R      = input.float(5.0, "TP3 (R)", minval = 0.5, group = grpRisk)
+bufTicks  = input.int(2, "Stop buffer beyond the trigger candle (ticks)", minval = 0, group = grpRisk)
+maxLosses = input.int(2, "Max full losses per day (long + short combined)", minval = 1, group = grpRisk)
+maxChase  = input.float(10, "Max chase past a broken swing (points)", minval = 0, group = grpRisk)
+moveBE    = input.bool(true, "Move stop to breakeven after TP1", group = grpRisk)
+
+grpCtx  = "Context"
+htfTf   = input.timeframe("15", "Bias timeframe", group = grpCtx)
+pivLen  = input.int(5, "Swing length (bars each side)", minval = 2, group = grpCtx)
+sessIn  = input.session("0935-1130", "Entry window (New York time)", group = grpCtx)
+flatAt  = input.session("1555-1600", "Flatten window (New York time)", group = grpCtx)
+
+grpAlert = "Alerts (tvclaude)"
+sendJson = input.bool(true, "Send a tvclaude JSON alert on each entry", group = grpAlert)
+secret   = input.string("REPLACE_WITH_WEBHOOK_SECRET", "Webhook secret", group = grpAlert)
+
+allowLong  = dirMode != "Short only"
+allowShort = dirMode != "Long only"
+
+// ---------------------------------------------------------------- indicators
+ema9   = ta.ema(close, 9)
+ema21  = ta.ema(close, 21)
+ema50  = ta.ema(close, 50)
+vwap   = ta.vwap(hlc3)
+rsi    = ta.rsi(close, 14)
+volAvg = ta.sma(volume, 20)
+[macd, macdSig, macdHist] = ta.macd(close, 12, 26, 9)
+
+// Higher-timeframe bias from the last COMPLETED bias bar ([1] + lookahead_on = no repainting).
+[hClose, hVwap, hEma21, hEma50] = request.security(syminfo.tickerid, htfTf,
+     [close[1], ta.vwap(hlc3)[1], ta.ema(close, 21)[1], ta.ema(close, 50)[1]], lookahead = barmerge.lookahead_on)
+[pdh, pdl] = request.security(syminfo.tickerid, "D", [high[1], low[1]], lookahead = barmerge.lookahead_on)
+bullBias = hClose > hVwap and hEma21 > hEma50
+bearBias = hClose < hVwap and hEma21 < hEma50
+
+// ---------------------------------------------------------------- structure
+ph = ta.pivothigh(high, pivLen, pivLen)
+pl = ta.pivotlow(low, pivLen, pivLen)
+var float swingHigh = na
+var float swingLow  = na
+if not na(ph)
+    swingHigh := ph
+if not na(pl)
+    swingLow := pl
+
+crossHigh = ta.crossover(close, swingHigh)          // computed every bar, outside the and-chains
+crossLow  = ta.crossunder(close, swingLow)
+sweepLow  = not na(swingLow) and low < swingLow and close > swingLow      // bullish sweep
+bosUp     = not na(swingHigh) and crossHigh
+sweepHigh = not na(swingHigh) and high > swingHigh and close < swingHigh  // bearish sweep
+bosDown   = not na(swingLow) and crossLow
+
+// ---------------------------------------------------------------- session + ONE shared daily loss count
+inWindow = not na(time(timeframe.period, sessIn, "America/New_York"))
+inFlat   = not na(time(timeframe.period, flatAt, "America/New_York"))
+nyDay    = dayofmonth(time, "America/New_York")
+newDay   = nyDay != nyDay[1]
+
+var int   lossesToday   = 0
+var float equityAtEntry = na
+if newDay
+    lossesToday := 0
+justClosed = strategy.position_size == 0 and strategy.position_size[1] != 0
+if justClosed and not na(equityAtEntry)
+    if strategy.netprofit - equityAtEntry <= -0.5 * riskUsd
+        lossesToday += 1
+    equityAtEntry := na
+
+// Hard backstop: a daily cut-off at max losses x risk, across both directions.
+strategy.risk.max_intraday_loss(maxLosses * riskUsd, strategy.cash)
+
+// ---------------------------------------------------------------- the two candidate setups
+pv = syminfo.pointvalue                 // MNQ = 2, NQ = 20
+
+contracts(float rPts) => rPts > 0 ? math.floor(riskUsd / (rPts * pv)) : 0
+nearer(float a, float b, bool above) => na(a) ? b : na(b) ? a : above ? math.min(a, b) : math.max(a, b)
+reason(int qty, float rPts, float roomR, float lvl, string lvlName, float chase) =>
+    string r = ""
+    if qty < 1
+        r := "stop of " + str.tostring(rPts, "#.##") + " pts is too wide for $" + str.tostring(riskUsd)
+    else if not na(roomR) and roomR < minR
+        r := lvlName + " " + str.tostring(lvl, format.mintick) + " is only " + str.tostring(roomR, "#.#") + "R away"
+    else if chase > maxChase
+        r := "chasing " + str.tostring(chase, "#.##") + " pts past the broken swing"
+    r
+
+// Long candidate: room up to the nearest resistance.
+longTrig  = allowLong and bullBias and close > vwap and ema9 > ema21 and (sweepLow or bosUp)
+stopL     = low - bufTicks * syminfo.mintick
+rL        = close - stopL
+qtyL      = contracts(rL)
+resL      = nearer(not na(swingHigh) and swingHigh > close ? swingHigh : na, not na(pdh) and pdh > close ? pdh : na, true)
+roomL     = na(resL) or rL <= 0 ? na : (resL - close) / rL
+whyL      = reason(qtyL, rL, roomL, resL, "resistance", bosUp and not sweepLow ? close - swingHigh : 0.0)
+
+// Short candidate: room down to the nearest support.
+shortTrig = allowShort and bearBias and close < vwap and ema9 < ema21 and (sweepHigh or bosDown)
+stopS     = high + bufTicks * syminfo.mintick
+rS        = stopS - close
+qtyS      = contracts(rS)
+supS      = nearer(not na(swingLow) and swingLow < close ? swingLow : na, not na(pdl) and pdl < close ? pdl : na, false)
+roomS     = na(supS) or rS <= 0 ? na : (close - supS) / rS
+whyS      = reason(qtyS, rS, roomS, supS, "support", bosDown and not sweepHigh ? swingLow - close : 0.0)
+
+canTrade   = inWindow and lossesToday < maxLosses and strategy.position_size == 0
+conflict   = longTrig and shortTrig          // cannot happen with opposite biases; skipped if it ever does
+takeLong   = longTrig and not conflict and canTrade and whyL == ""
+takeShort  = shortTrig and not conflict and canTrade and whyS == ""
+avoidLong  = longTrig and not conflict and canTrade and whyL != ""
+avoidShort = shortTrig and not conflict and canTrade and whyS != ""
+
+// ---------------------------------------------------------------- alert JSON (tvclaude schema)
+f(x) => na(x) ? "null" : str.tostring(x, "#.####")
+q(s) => '"' + s + '"'
+buildMsg(bool isLong, float sup, float res, string plan) =>
+    tf = timeframe.isintraday ? str.tostring(timeframe.multiplier) : timeframe.period
+    bosTxt   = isLong ? (bosUp ? q("bullish") : "null") : (bosDown ? q("bearish") : "null")
+    sweepTxt = isLong ? (sweepLow ? q("below_low") : "null") : (sweepHigh ? q("above_high") : "null")
+    '{"secret":' + q(secret) + ',"ticker":' + q(syminfo.tickerid) + ',"asset_class":"future","timeframe":' + q(tf) +
+     ',"signal":' + q(isLong ? "bullish_setup" : "bearish_setup") + ',"price":' + f(close) +
+     ',"time":' + q(str.format_time(time_close, "yyyy-MM-dd'T'HH:mm:ss'Z'", "UTC")) +
+     ',"indicators":{"rsi":' + f(rsi) + ',"ema9":' + f(ema9) + ',"ema21":' + f(ema21) + ',"ema50":' + f(ema50) +
+     ',"vwap":' + f(vwap) + ',"macd":' + f(macd) + ',"macd_signal":' + f(macdSig) + ',"macd_hist":' + f(macdHist) +
+     ',"volume":' + f(volume) + ',"volume_avg":' + f(volAvg) + '}' +
+     ',"structure":{"support":' + (na(sup) ? "[]" : "[" + f(sup) + "]") +
+     ',"resistance":' + (na(res) ? "[]" : "[" + f(res) + "]") +
+     ',"trend":' + q(isLong ? "up" : "down") + ',"bos":' + bosTxt + ',"liquidity_sweep":' + sweepTxt +
+     ',"swing_high":' + f(swingHigh) + ',"swing_low":' + f(swingLow) + '}' +
+     ',"notes":' + q(plan) + '}'
+
+// ---------------------------------------------------------------- orders (one position at a time)
+var string entryId = ""
+var float  stop0   = na
+var float  tp1     = na
+var float  tp2     = na
+var float  tp3     = na
+var int    qTot    = 0
+var int    q1      = 0
+var int    q2      = 0
+var int    q3      = 0
+var bool   beArmed = false
+var string lastNote = "none yet"
+
+if takeLong or takeShort
+    isLong = takeLong
+    rPts   = isLong ? rL : rS
+    dir    = isLong ? 1 : -1
+    entryId := isLong ? "L" : "S"
+    stop0 := isLong ? stopL : stopS
+    tp1   := close + dir * tp1R * rPts
+    tp2   := close + dir * tp2R * rPts
+    tp3   := close + dir * tp3R * rPts
+    qTot  := isLong ? qtyL : qtyS
+    if qTot >= 3
+        base = math.floor(qTot / 3)
+        q2 := base
+        q3 := base
+        q1 := qTot - 2 * base
+    else if qTot == 2
+        q1 := 1
+        q2 := 0
+        q3 := 1
+    else
+        q1 := 1
+        q2 := 0
+        q3 := 0
+    beArmed := false
+    equityAtEntry := strategy.netprofit
+    strategy.entry(entryId, isLong ? strategy.long : strategy.short, qty = qTot)
+    strategy.exit("TP1", entryId, qty = q1, limit = tp1, stop = stop0)
+    if q2 > 0
+        strategy.exit("TP2", entryId, qty = q2, limit = tp2, stop = stop0)
+    if q3 > 0
+        strategy.exit("TP3", entryId, qty = q3, limit = tp3, stop = stop0)
+    plan = (isLong ? "long " : "short ") + str.tostring(qTot) + " @ ~" + str.tostring(close, format.mintick) +
+         ", stop " + str.tostring(stop0, format.mintick) + " (" + str.tostring(rPts, "#.##") + " pts = $" +
+         str.tostring(qTot * rPts * pv, "#") + "), TP " + str.tostring(tp1, format.mintick) + " / " +
+         str.tostring(tp2, format.mintick) + " / " + str.tostring(tp3, format.mintick)
+    lastNote := plan
+    if sendJson
+        alert(buildMsg(isLong, isLong ? swingLow : supS, isLong ? resL : swingHigh, plan), alert.freq_once_per_bar_close)
+
+// After TP1 fills, move the remaining legs' stop to the average entry price (breakeven), either side.
+posAbs = math.abs(strategy.position_size)
+if strategy.position_size != 0 and moveBE and not beArmed and posAbs <= qTot - q1 and q2 + q3 > 0
+    beArmed := true
+    be = strategy.position_avg_price
+    if q2 > 0 and posAbs > q3
+        strategy.exit("TP2", entryId, qty = q2, limit = tp2, stop = be)
+    if q3 > 0
+        strategy.exit("TP3", entryId, qty = q3, limit = tp3, stop = be)
+
+if inFlat and strategy.position_size != 0
+    strategy.close_all(comment = "flat before the close")
+
+if avoidLong
+    lastNote := "AVOID long: " + whyL
+    label.new(bar_index, low, "AVOID", style = label.style_label_up, color = color.new(color.gray, 40),
+         textcolor = color.white, size = size.tiny, tooltip = "Long skipped: " + whyL)
+if avoidShort
+    lastNote := "AVOID short: " + whyS
+    label.new(bar_index, high, "AVOID", style = label.style_label_down, color = color.new(color.gray, 40),
+         textcolor = color.white, size = size.tiny, tooltip = "Short skipped: " + whyS)
+
+// ---------------------------------------------------------------- visuals
+inPos = strategy.position_size != 0
+plot(vwap,  "VWAP",   color.new(color.orange, 0))
+plot(ema9,  "EMA 9",  color.new(color.teal, 30))
+plot(ema21, "EMA 21", color.new(color.blue, 30))
+plot(ema50, "EMA 50", color.new(color.gray, 30))
+plot(inPos ? (beArmed ? strategy.position_avg_price : stop0) : na, "Stop", color.red, 2, plot.style_linebr)
+plot(inPos ? tp1 : na, "TP1", color.new(color.green, 50), 1, plot.style_linebr)
+plot(inPos ? tp2 : na, "TP2", color.new(color.green, 30), 1, plot.style_linebr)
+plot(inPos ? tp3 : na, "TP3", color.green, 2, plot.style_linebr)
+plotshape(takeLong, "Long entry", shape.triangleup, location.belowbar, color.green, size = size.small)
+plotshape(takeShort, "Short entry", shape.triangledown, location.abovebar, color.red, size = size.small)
+bgcolor(inWindow ? color.new(color.blue, 95) : na, title = "Entry window")
+
+var table info = table.new(position.top_right, 2, 6, bgcolor = color.new(color.black, 15), border_width = 1)
+if barstate.islast
+    biasTxt = bullBias ? "Bullish" : bearBias ? "Bearish" : "Neutral (no trades)"
+    table.cell(info, 0, 0, "15m bias", text_color = color.silver)
+    table.cell(info, 1, 0, biasTxt, text_color = bullBias ? color.lime : bearBias ? color.red : color.gray)
+    table.cell(info, 0, 1, "Directions", text_color = color.silver)
+    table.cell(info, 1, 1, dirMode, text_color = color.white)
+    table.cell(info, 0, 2, "Entry window", text_color = color.silver)
+    table.cell(info, 1, 2, inWindow ? "Open" : "Closed", text_color = inWindow ? color.lime : color.gray)
+    table.cell(info, 0, 3, "Losses today (both sides)", text_color = color.silver)
+    table.cell(info, 1, 3, str.tostring(lossesToday) + " / " + str.tostring(maxLosses),
+         text_color = lossesToday >= maxLosses ? color.red : color.white)
+    table.cell(info, 0, 4, "$ per point", text_color = color.silver)
+    table.cell(info, 1, 4, str.tostring(pv) + "  (risk $" + str.tostring(riskUsd) + ")", text_color = color.white)
+    table.cell(info, 0, 5, "Last signal", text_color = color.silver)
+    table.cell(info, 1, 5, lastNote, text_color = color.white)

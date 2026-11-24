@@ -80,7 +80,12 @@ TradingView only sends webhooks to public HTTPS URLs on port 80 or 443. Put the 
 - a sweep of the last swing high, or a close below the last swing low, under VWAP with EMA 9 < 21
 - a stop 2 ticks above the trigger high, at least 2R of room to the nearest support (swing low or prior-day low), and targets in thirds below
 
-**Running both:** each script counts its own 2-loss daily stop, so together they could lose 4 × $250 = $1,000 in a day, the whole drawdown. Halve "Max full losses per day" to 1 in each when they run together. The tvclaude backend's drawdown check covers alerts from both either way.
+**Combined strategy (recommended):** `tradingview/nq_setups_strategy.pine` runs the long and short rules in one script:
+- a **Directions** setting picks Both, Long only or Short only
+- **one shared 2-loss daily stop** across both sides, and one position at a time
+- the rest as above: 15m bias, triggers, the 2R room test, $250 sizing, and the 2R/3R/5R ladder
+
+Use it instead of loading the bullish and bearish scripts together. Run separately, each counts its own losses, so together they could lose 4 × $250 = $1,000 in a day, the whole drawdown.
 
 Its Strategy Tester results are history, not a forecast. Set your real per-contract commission in Properties first. With "alert() function calls only", each entry sends a tvclaude alert carrying the plan in `notes`.
 
@@ -129,7 +134,7 @@ The secret goes in the JSON body because TradingView can't set headers. The serv
 ## Tests
 
 ```bash
-cd backend && .venv/bin/python -m pytest -q        # 137 tests, offline, no API cost
+cd backend && .venv/bin/python -m pytest -q        # 139 tests, offline, no API cost
 RUN_LIVE_CLAUDE_TESTS=1 ANTHROPIC_API_KEY=... .venv/bin/python -m pytest -q -k live   # one real Claude call
 ```
 
