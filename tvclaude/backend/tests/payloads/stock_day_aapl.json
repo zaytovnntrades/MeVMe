@@ -1,0 +1,13 @@
+{
+  "secret": "REPLACE_WITH_WEBHOOK_SECRET",
+  "ticker": "NASDAQ:AAPL",
+  "timeframe": "15",
+  "strategy": "day",
+  "signal": "breakout_retest",
+  "price": 231.40,
+  "time": "2026-11-24T16:00:00Z",
+  "indicators": {"rsi": 61.0, "ema9": 230.9, "ema21": 230.1, "ema50": 228.7, "vwap": 229.8,
+                 "macd": 0.42, "macd_signal": 0.31, "macd_hist": 0.11, "volume": 1250000, "volume_avg": 900000},
+  "structure": {"support": [230.0, 228.5], "resistance": [233.0, 235.5], "trend": "up", "bos": "bullish"},
+  "notes": "Illustrative values only."
+}

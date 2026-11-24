@@ -1,0 +1,12 @@
+{
+  "secret": "REPLACE_WITH_WEBHOOK_SECRET",
+  "ticker": "SPY",
+  "timeframe": "D",
+  "signal": "pullback_to_ema21",
+  "price": 598.20,
+  "indicators": {"rsi": 54.0, "ema21": 596.5, "ema50": 589.0, "macd": 2.1, "macd_signal": 1.8, "macd_hist": 0.3},
+  "structure": {"support": [595.0, 588.0], "resistance": [606.0, 615.0], "trend": "up"},
+  "option": {"underlying": "SPY", "right": "call", "strike": 605, "expiry": "2026-12-18", "bid": 6.10,
+             "ask": 6.25, "iv": 0.17, "delta": 0.41, "open_interest": 12000, "multiplier": 100},
+  "notes": "Illustrative values only."
+}

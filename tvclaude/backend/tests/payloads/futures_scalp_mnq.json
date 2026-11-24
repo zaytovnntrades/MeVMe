@@ -1,0 +1,13 @@
+{
+  "secret": "REPLACE_WITH_WEBHOOK_SECRET",
+  "ticker": "CME_MINI:MNQ1!",
+  "timeframe": "1",
+  "signal": "vwap_reclaim_long",
+  "price": 21000.25,
+  "time": "2026-11-24T15:31:00Z",
+  "indicators": {"rsi": 56.2, "ema9": 20996.5, "ema21": 20991.0, "ema50": 20980.75, "vwap": 20994.0,
+                 "volume": 1840, "volume_avg": 1210, "atr": 9.5},
+  "structure": {"support": [20985.0, 20970.0], "resistance": [21020.0, 21045.0], "trend": "up",
+                "liquidity_sweep": "below_low", "swing_low": 20986.0, "swing_high": 21018.0},
+  "notes": "Illustrative values only, not live market data."
+}

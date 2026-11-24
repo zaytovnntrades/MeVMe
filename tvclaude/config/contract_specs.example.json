@@ -1,0 +1,11 @@
+{
+  "_comment": "Copy to contract_specs.json and VERIFY every value against your broker/exchange. The system never assumes a contract size.",
+  "futures": {
+    "NQ":  {"multiplier": 20,  "tick_size": 0.25},
+    "MNQ": {"multiplier": 2,   "tick_size": 0.25},
+    "ES":  {"multiplier": 50,  "tick_size": 0.25},
+    "MES": {"multiplier": 5,   "tick_size": 0.25}
+  },
+  "options": {"default_multiplier": 100},
+  "crypto": {"BTCUSDT.P": {"qty_step": 0.001}, "ETHUSDT.P": {"qty_step": 0.01}}
+}

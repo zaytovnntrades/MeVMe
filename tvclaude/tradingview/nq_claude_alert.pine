@@ -1,0 +1,88 @@
+//@version=6
+// TV x Claude analyst: sends one JSON alert per signal for NQ / MNQ.
+// Setup: add to an NQ1! or MNQ1! chart, then create ONE alert:
+//   Condition: this indicator -> "Any alert() function call"
+//   Webhook URL: https://YOUR-SERVER/webhook/tradingview
+//   Message: leave as is (the script builds the JSON itself)
+// The values below are computed on YOUR chart; the server and Claude can't see the chart otherwise.
+// This script only describes the market. Your entry rule decides when an alert fires.
+indicator("TV x Claude - NQ alert", overlay = true)
+
+secret   = input.string("REPLACE_WITH_WEBHOOK_SECRET", "Webhook secret (WEBHOOK_SECRET on the server)")
+strategy = input.string("auto", "Strategy module", options = ["auto", "scalping", "day", "swing"])
+pivLen   = input.int(5, "Pivot length (support/resistance, swings)", minval = 2)
+volLen   = input.int(20, "Volume average length")
+
+// ---- indicators
+ema9  = ta.ema(close, 9)
+ema21 = ta.ema(close, 21)
+ema50 = ta.ema(close, 50)
+vwap  = ta.vwap(hlc3)
+rsi   = ta.rsi(close, 14)
+[macd, macdSig, macdHist] = ta.macd(close, 12, 26, 9)
+volAvg = ta.sma(volume, volLen)
+atr    = ta.atr(14)
+
+// ---- structure: last confirmed swing high / low
+ph = ta.pivothigh(high, pivLen, pivLen)
+pl = ta.pivotlow(low, pivLen, pivLen)
+var float swingHigh = na
+var float swingLow  = na
+var float prevHigh  = na
+var float prevLow   = na
+if not na(ph)
+    prevHigh := swingHigh
+    swingHigh := ph
+if not na(pl)
+    prevLow := swingLow
+    swingLow := pl
+
+trend = not na(prevHigh) and not na(prevLow) ? (swingHigh > prevHigh and swingLow > prevLow ? "up" : swingHigh < prevHigh and swingLow < prevLow ? "down" : "range") : "range"
+bosUp   = not na(swingHigh) and ta.crossover(close, swingHigh)
+bosDown = not na(swingLow) and ta.crossunder(close, swingLow)
+// Liquidity sweep: wick through the last swing, close back inside.
+sweepLow  = not na(swingLow) and low < swingLow and close > swingLow
+sweepHigh = not na(swingHigh) and high > swingHigh and close < swingHigh
+// Fair value gap (3-candle imbalance), most recent one.
+var float fvgLow = na
+var float fvgHigh = na
+if low > high[2]
+    fvgLow := high[2]
+    fvgHigh := low
+if high < low[2]
+    fvgLow := high
+    fvgHigh := low[2]
+
+// ---- YOUR signal. Replace with your own entry rules.
+longSignal  = (sweepLow or bosUp) and close > vwap and ema9 > ema21
+shortSignal = (sweepHigh or bosDown) and close < vwap and ema9 < ema21
+
+f(x) => na(x) ? "null" : str.tostring(x, "#.####")
+q(s) => '"' + s + '"'
+
+buildMsg(sig) =>
+    tf = timeframe.isintraday ? str.tostring(timeframe.multiplier) : timeframe.period
+    strat = strategy == "auto" ? "" : ',"strategy":' + q(strategy)
+    bos = bosUp ? q("bullish") : bosDown ? q("bearish") : "null"
+    sweep = sweepLow ? q("below_low") : sweepHigh ? q("above_high") : "null"
+    fvg = na(fvgLow) ? "[]" : '[{"low":' + f(fvgLow) + ',"high":' + f(fvgHigh) + '}]'
+    '{"secret":' + q(secret) + ',"ticker":' + q(syminfo.tickerid) + ',"asset_class":"future","timeframe":' + q(tf) + strat +
+     ',"signal":' + q(sig) + ',"price":' + f(close) + ',"time":' + q(str.format_time(time_close, "yyyy-MM-dd'T'HH:mm:ss'Z'", "UTC")) +
+     ',"indicators":{"rsi":' + f(rsi) + ',"ema9":' + f(ema9) + ',"ema21":' + f(ema21) + ',"ema50":' + f(ema50) +
+     ',"vwap":' + f(vwap) + ',"macd":' + f(macd) + ',"macd_signal":' + f(macdSig) + ',"macd_hist":' + f(macdHist) +
+     ',"volume":' + f(volume) + ',"volume_avg":' + f(volAvg) + ',"atr":' + f(atr) + '}' +
+     ',"structure":{"support":' + (na(swingLow) ? "[]" : "[" + f(swingLow) + "]") + ',"resistance":' + (na(swingHigh) ? "[]" : "[" + f(swingHigh) + "]") +
+     ',"trend":' + q(trend) + ',"bos":' + bos + ',"liquidity_sweep":' + sweep + ',"fvg":' + fvg +
+     ',"swing_high":' + f(swingHigh) + ',"swing_low":' + f(swingLow) + '}}'
+
+if longSignal and barstate.isconfirmed
+    alert(buildMsg("long_candidate"), alert.freq_once_per_bar_close)
+if shortSignal and barstate.isconfirmed
+    alert(buildMsg("short_candidate"), alert.freq_once_per_bar_close)
+
+plot(vwap, "VWAP", color = color.new(color.orange, 0))
+plot(ema9, "EMA 9", color = color.new(color.teal, 30))
+plot(ema21, "EMA 21", color = color.new(color.blue, 30))
+plot(ema50, "EMA 50", color = color.new(color.gray, 30))
+plotshape(longSignal and barstate.isconfirmed, "Long candidate", shape.triangleup, location.belowbar, color.new(color.green, 0))
+plotshape(shortSignal and barstate.isconfirmed, "Short candidate", shape.triangledown, location.abovebar, color.new(color.red, 0))
