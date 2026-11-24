@@ -33,6 +33,7 @@ LIMIT_KEYS = {
     "require_stop_loss": "true: every entry must carry a stop-loss",
     "max_stop_loss_pct": "widest stop-loss allowed, as % price move from entry",
     "max_risk_usdt": "most one trade may lose if its stop is hit (notional x stop %)",
+    "min_reward_risk": "take-profit distance must be at least this multiple of the stop distance (2 = 1:2)",
     "max_entries_per_day": "entries allowed per UTC day",
     "max_entries_per_symbol_per_day": "entries allowed per symbol per UTC day",
     "max_daily_risk_usdt": "total stop-loss risk allowed across all entries per UTC day (crypto + futures)",
@@ -132,7 +133,32 @@ def measure_crypto(payload: dict, limits: dict) -> dict:
         elif price:
             sl_pct = abs(price - sl_raw) / price * 100
     risk = notional * sl_pct / 100 if notional is not None and sl_pct is not None else None
-    return {"market": "crypto", "symbol": norm_symbol(payload.get("coin_pair", "")), "sizing": sizing, "leverage": lev,
+
+    # Take-profit: size-weighted average distance across the legs that will actually be sent.
+    direction = "long" if str(payload.get("position")) == "0" else "short"
+    pct_mode = str(payload.get("tp_type")) == "1"
+    side_errors, legs = [], []
+    if sl_raw and not pct_mode and price and has_sl:
+        if (direction == "long" and sl_raw >= price) or (direction == "short" and sl_raw <= price):
+            side_errors.append(f"stop-loss {sl_raw:g} is on the wrong side of entry {price:g} for a {direction}")
+    if str(payload.get("force_tp")) == "1":
+        names = ("tp_1", "tp_2", "tp_3") if str(payload.get("multi_tp")) == "1" else ("tp_3",)
+        for n in names:
+            tp, size = _num(payload.get(f"{n}_price")), _num(payload.get(f"{n}_size")) or 0
+            if tp is None or size <= 0:
+                continue
+            if pct_mode:
+                legs.append((size, tp))
+            elif price:
+                if (direction == "long" and tp <= price) or (direction == "short" and tp >= price):
+                    side_errors.append(f"take-profit {tp:g} is on the wrong side of entry {price:g} for a {direction}")
+                legs.append((size, abs(tp - price) / price * 100))
+            else:
+                legs = None
+                break
+    reward_pct = (sum(s * d for s, d in legs) / sum(s for s, _ in legs)) if legs else None
+    rr = reward_pct / sl_pct if reward_pct is not None and sl_pct else None
+    return {"market": "crypto", "reward_pct": reward_pct, "reward_risk": rr, "side_errors": side_errors, "symbol": norm_symbol(payload.get("coin_pair", "")), "sizing": sizing, "leverage": lev,
             "margin_usdt": margin, "wallet_pct": wallet_pct, "notional_usdt": notional,
             "has_stop_loss": has_sl, "stop_loss_pct": sl_pct, "risk_usdt": risk}
 
@@ -140,7 +166,29 @@ def measure_crypto(payload: dict, limits: dict) -> dict:
 def check_static(m: dict, limits: dict, now: float | None = None) -> list[str]:
     """Rules that depend on this one entry only."""
     if m.get("market") == "futures":
-        return futures.check_static(m, limits, time.time() if now is None else now)
+        r = futures.check_static(m, limits, time.time() if now is None else now)
+    else:
+        r = check_crypto(m, limits)
+    return r + list(m.get("side_errors") or []) + check_reward_risk(m, limits)
+
+
+def check_reward_risk(m: dict, limits: dict) -> list[str]:
+    """min_reward_risk: 2 means the take-profit must be at least 2x as far as the stop (1:2)."""
+    need = limits.get("min_reward_risk")
+    if not need:
+        return []
+    if not m.get("has_stop_loss"):
+        return [f"reward:risk can't be measured without a stop-loss (min 1:{need:g})"]
+    if m.get("reward_risk") is None:
+        unit = "points" if m.get("market") == "futures" else "%"
+        return [f"reward:risk can't be measured: no take-profit, or its distance in {unit} is unknown "
+                f"(min 1:{need:g})"]
+    if m["reward_risk"] + 1e-9 < need:
+        return [f"reward:risk 1:{m['reward_risk']:.2f} < min_reward_risk 1:{need:g}"]
+    return []
+
+
+def check_crypto(m: dict, limits: dict) -> list[str]:
     r = []
     sym = m["symbol"]
     if sym in limits.get("blocked_symbols", []):

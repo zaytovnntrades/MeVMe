@@ -158,6 +158,49 @@ class Rules(unittest.TestCase):
         self.assertEqual(self.reasons(ENTRY, {"max_leverage": 5, "max_notional_usdt": 1000}), [])
 
 
+class RewardRisk(unittest.TestCase):
+    LIM = {"min_reward_risk": 2}
+
+    def reasons(self, payload, limits=None):
+        limits = self.LIM if limits is None else limits
+        return risk.check_static(risk.measure(payload, limits), limits, TUE_10AM)
+
+    def test_exactly_1_to_2_passes(self):
+        self.assertEqual(self.reasons({**ENTRY, "takeProfit": {"limitPrice": 21020}}), [])
+
+    def test_1_to_1_5_blocked(self):
+        r = self.reasons({**ENTRY, "takeProfit": {"limitPrice": 21015}})
+        self.assertIn("reward:risk 1:1.50 < min_reward_risk 1:2", r[0])
+
+    def test_short_side(self):
+        short = {**ENTRY, "action": "sell", "sentiment": "short", "stopLoss": {"stopPrice": 21010},
+                 "takeProfit": {"limitPrice": 20980}}
+        self.assertEqual(self.reasons(short), [])
+        self.assertTrue(self.reasons({**short, "takeProfit": {"limitPrice": 20990}}))
+
+    def test_percent_target(self):
+        m = risk.measure({**ENTRY, "takeProfit": {"percent": 0.1}}, {})  # 21 pts vs 10-pt stop
+        self.assertAlmostEqual(m["reward_risk"], 2.1)
+
+    def test_no_target_or_unverified_amount_blocked(self):
+        no_tp = {k: v for k, v in ENTRY.items() if k != "takeProfit"}
+        self.assertIn("no take-profit", self.reasons(no_tp)[0])
+        self.assertIn("unknown", self.reasons({**ENTRY, "takeProfit": {"amount": 30}})[0])
+
+    def test_no_stop_blocked(self):
+        no_sl = {k: v for k, v in ENTRY.items() if k != "stopLoss"}
+        self.assertIn("without a stop-loss", self.reasons(no_sl)[0])
+
+    def test_wrong_side_levels_always_blocked(self):
+        r = self.reasons({**ENTRY, "stopLoss": {"stopPrice": 21010}, "takeProfit": {"limitPrice": 20970}}, {})
+        text = " | ".join(r)
+        self.assertIn("stop-loss 21010 is on the wrong side", text)
+        self.assertIn("take-profit 20970 is on the wrong side", text)
+
+    def test_rule_off_by_default(self):
+        self.assertEqual(self.reasons({k: v for k, v in ENTRY.items() if k != "takeProfit"}, {}), [])
+
+
 class LoadLimits(unittest.TestCase):
     def load(self, data):
         f = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False)
@@ -241,7 +284,7 @@ class GateWiring(unittest.TestCase):
     def test_one_daily_budget_across_crypto_and_futures(self):
         crypto = {"exchange": "bybit", "coin_pair": "BTCUSDT.P", "position": "0", "qty": "100",
                   "qty_in_percentage": "2", "buy_leverage": "10", "force_tp": "1", "tp_type": "1",
-                  "stop_loss_price": "2"}  # $20 risk
+                  "stop_loss_price": "2", "tp_3_size": "100", "tp_3_price": "4"}  # $20 risk, 1:2
         results = [self.run_one(p) for p in (crypto, {**ENTRY, "ticker": "MES1!", "price": 6000,
                    "stopLoss": {"stopPrice": 5996}}, ENTRY, {**ENTRY, "comment": "second signal"})]
         self.assertEqual([r["approved"] for r in results], [True, True, True, False])

@@ -97,8 +97,31 @@ def measure(payload: dict, limits: dict) -> dict:
         # stopLoss.amount: meaning not verified here, so stop distance stays unknown.
 
     risk = contracts * stop_points * pv if None not in (contracts, stop_points, pv) else None
+
+    direction = classify(payload)[1] or "long"
+    side_errors = []
+
+    def wrong_side(level: float, kind: str) -> None:
+        bad = (level >= price) if (kind == "stop") == (direction == "long") else (level <= price)
+        if bad:
+            label = "stop-loss" if kind == "stop" else "take-profit"
+            side_errors.append(f"{label} {level:g} is on the wrong side of entry {price:g} for a {direction}")
+
+    if has_sl and price and _num(sl.get("stopPrice")):
+        wrong_side(_num(sl["stopPrice"]), "stop")
+    tp = payload.get("takeProfit")
+    tp_points = None
+    if isinstance(tp, dict) and price:
+        if _num(tp.get("limitPrice")):
+            wrong_side(_num(tp["limitPrice"]), "target")
+            tp_points = abs(_num(tp["limitPrice"]) - price)
+        elif _num(tp.get("percent")):
+            tp_points = price * _num(tp["percent"]) / 100
+        # takeProfit.amount: meaning not verified here, so the target distance stays unknown.
+    rr = tp_points / stop_points if tp_points is not None and stop_points else None
     notional = contracts * price * pv if None not in (contracts, price, pv) else None
-    return {"market": "futures", "symbol": root, "point_value": pv, "contracts": contracts,
+    return {"market": "futures", "target_points": tp_points, "reward_risk": rr, "side_errors": side_errors,
+            "symbol": root, "point_value": pv, "contracts": contracts,
             "quantity_type": qtype, "price": price, "has_stop_loss": has_sl,
             "stop_points": stop_points, "risk_usdt": risk, "notional_usdt": notional}
 

@@ -95,6 +95,46 @@ class Static(unittest.TestCase):
         self.assertIn("15% of wallet", r[0])
 
 
+class CryptoRewardRisk(unittest.TestCase):
+    LIM = {"min_reward_risk": 2}
+
+    def reasons(self, payload, limits=None):
+        limits = self.LIM if limits is None else limits
+        return risk.check_static(risk.measure(payload, limits), limits)
+
+    def test_builder_tp4_sl2_is_1_to_2(self):
+        self.assertAlmostEqual(risk.measure(ENTRY, {})["reward_risk"], 2)
+        self.assertEqual(self.reasons(ENTRY), [])
+
+    def test_tighter_target_blocked(self):
+        self.assertIn("1:1.50", self.reasons({**ENTRY, "tp_3_price": "3"})[0])
+
+    def test_multi_tp_uses_size_weighted_average(self):
+        multi = {**ENTRY, "multi_tp": "1", "tp_1_size": "40", "tp_1_price": "2", "tp_2_size": "30",
+                 "tp_2_price": "4", "tp_3_size": "30", "tp_3_price": "6"}
+        self.assertAlmostEqual(risk.measure(multi, {})["reward_risk"], 1.9)  # (0.4x2+0.3x4+0.3x6)/2
+        self.assertIn("1:1.90", self.reasons(multi)[0])
+        self.assertEqual(self.reasons({**multi, "tp_1_price": "3"}), [])  # 4.2 / 2 = 2.1
+
+    def test_single_tp_ignores_unsent_legs(self):
+        self.assertAlmostEqual(risk.measure({**ENTRY, "tp_1_size": "50", "tp_1_price": "0.5"}, {})["reward_risk"], 2)
+
+    def test_absolute_prices(self):
+        p = {**ENTRY, "tp_type": "0", "signal_price": "100000", "stop_loss_price": "99000", "tp_3_price": "102000"}
+        self.assertAlmostEqual(risk.measure(p, {})["reward_risk"], 2)
+        bad = {**p, "stop_loss_price": "101000", "tp_3_price": "98000"}
+        text = " | ".join(self.reasons(bad, {}))
+        self.assertIn("stop-loss 101000 is on the wrong side", text)
+        self.assertIn("take-profit 98000 is on the wrong side", text)
+
+    def test_absolute_without_price_cant_be_measured(self):
+        p = {**ENTRY, "tp_type": "0", "stop_loss_price": "99000", "tp_3_price": "102000"}
+        self.assertIn("can't be measured", self.reasons(p)[0])
+
+    def test_no_take_profit(self):
+        self.assertIn("no take-profit", self.reasons({**ENTRY, "tp_3_size": "0"})[0])
+
+
 class LoadLimits(unittest.TestCase):
     def write(self, data):
         f = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False)
