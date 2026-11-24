@@ -230,3 +230,24 @@ def test_old_database_gets_new_column(tmp_path):
     cols = [r[1] for r in sqlite3.connect(path).execute("PRAGMA table_info(journal)")]
     assert "rules_followed" in cols
     db.create_all()                                                      # second run is a no-op
+
+
+def test_notify_test_reports_each_channel(monkeypatch, capsys, tmp_path):
+    import asyncio
+    from app import notify_test
+    from conftest import make_settings
+
+    sent = []
+
+    async def fake_send(self, text):
+        sent.append(type(self).__name__)
+        return True
+
+    monkeypatch.setattr(notify_test, "get_settings", lambda: make_settings(
+        tmp_path, discord_webhook_url="https://discord.com/api/webhooks/1/abc",
+        telegram_bot_token=None, telegram_chat_id=None))
+    monkeypatch.setattr(notify_test.Discord, "send", fake_send)
+    assert asyncio.run(notify_test.main()) == 0
+    out = capsys.readouterr().out
+    assert "discord: ok" in out and "telegram: not set" in out and "abc" not in out
+    assert sent == ["Discord"]

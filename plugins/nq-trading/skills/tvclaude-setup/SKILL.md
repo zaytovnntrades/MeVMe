@@ -22,7 +22,8 @@ tvclaude lives in the user's MeVMe repo under `tvclaude/`. Its README is the sou
 2. Run: `cd tvclaude && docker compose up -d --build`. Dashboard on `:3000`, API docs on `:8000/docs`.
 3. Public HTTPS: TradingView only posts to ports 80/443. Use Caddy/nginx with TLS and `TRUST_PROXY=true`, or for testing `cloudflared tunnel --url http://localhost:8000`.
 4. TradingView: load the NQ Setups strategy (see the `nq-pine` skill), set the same `WEBHOOK_SECRET` in its inputs, and create one alert with "alert() function calls only" pointing at `https://<host>/webhook/tradingview`.
-5. Check: send the sample payload in `tvclaude/backend/tests/payloads/`, watch it appear in the dashboard, then press **Send daily report** in the Coordinator panel and confirm Telegram and Discord both receive it.
+5. Test notifications: `cd tvclaude/backend && python -m app.notify_test` prints ok / failed / not set for Telegram and Discord and posts one test message. It never prints the URL or token.
+6. Check: send the sample payload in `tvclaude/backend/tests/payloads/`, watch it appear in the dashboard, then press **Send daily report** in the Coordinator panel and confirm Telegram and Discord both receive it.
 
 ## Troubleshooting
 - 401 on webhook: secret in the Pine input doesn't match `WEBHOOK_SECRET`.

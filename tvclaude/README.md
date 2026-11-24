@@ -94,6 +94,12 @@ cd ../frontend && npm ci && npm run build && npm start
 
 TradingView only sends webhooks to public HTTPS URLs on port 80 or 443. Put the API behind a reverse proxy with TLS, such as Caddy or nginx, and set `TRUST_PROXY=true`. For a quick test, use a tunnel such as `cloudflared tunnel --url http://localhost:8000`.
 
+## Connect Discord and Telegram
+
+1. Discord: channel → **Edit Channel → Integrations → Webhooks → New Webhook → Copy Webhook URL**. Paste it into `.env` as `DISCORD_WEBHOOK_URL=` (never into chat or the repo).
+2. Telegram: create a bot with @BotFather, message it once, then put `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` in `.env`.
+3. Test both: `cd backend && python -m app.notify_test`. Each channel prints ok, failed or not set, and gets one test message.
+
 ## Connect TradingView
 
 1. Add `tradingview/nq_claude_alert.pine` to an **NQ1!** or **MNQ1!** chart.
