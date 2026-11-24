@@ -30,7 +30,8 @@ Settings (environment variables):
   GATE_MAX_AGE         seconds, default 60. Entries whose `time` ({{timenow}}) is older are blocked.
   GATE_DEDUP_SEC       seconds, default 60. An identical entry inside this window is dropped.
   GATE_REVIEW_TIMEOUT  seconds, default 15. Grok slower than this counts as an error.
-  XAI_MODEL            Grok model, default from grok_client.py.
+  LLM_PROVIDER         "xai" (default) or "freellmapi"; see grok_client.py for LLM_BASE_URL/LLM_API_KEY/LLM_MODEL.
+  GATE_ALLOW_FREE_LLM_LIVE  "1" to allow GATE_LIVE=1 with freellmapi (refused by default).
 """
 import argparse
 import hashlib
@@ -171,16 +172,21 @@ def build_prompt(payload: dict, direction: str) -> str:
 
 def ask_grok(payload: dict, direction: str) -> dict:
     try:
-        out = grok_client.chat(
+        data = grok_client.chat_raw(
             [{"role": "system", "content": GATE_SYSTEM},
              {"role": "user", "content": build_prompt(payload, direction)}],
-            model=os.environ.get("XAI_MODEL", grok_client.DEFAULT_MODEL),
             temperature=0.2, json_mode=True,
             timeout=float(os.environ.get("GATE_REVIEW_TIMEOUT", "15")),
         )
-        return json.loads(out)
     except SystemExit as e:  # grok_client exits on HTTP errors; never kill the server thread
         raise RuntimeError(str(e))
+    verdict = grok_client.parse_json_reply(data["choices"][0]["message"]["content"])
+    if not isinstance(verdict, dict):
+        raise ValueError("reviewer reply is not a JSON object")
+    # Record who actually judged: a router like FreeLLMAPI may answer with a different model.
+    verdict["_reviewer"] = {"provider": grok_client.PROVIDER,
+                            "model": data.get("model") or grok_client.DEFAULT_MODEL}
+    return verdict
 
 
 def forward(payload: dict, attempts: int = 1, backoff: float = 1.0) -> str:
@@ -307,7 +313,12 @@ def make_handler(cfg: dict, analyzer=ask_grok, forwarder=forward):
 def serve() -> None:
     cfg = load_cfg()
     host, port = os.environ.get("GATE_HOST", "0.0.0.0"), int(os.environ.get("GATE_PORT", "8080"))
-    grok_client._key()  # fail fast if XAI_API_KEY is missing
+    grok_client._key()  # fail fast if the provider's key is missing
+    if cfg["live"] and grok_client.IS_FREE_TIER and os.environ.get("GATE_ALLOW_FREE_LLM_LIVE") != "1":
+        sys.exit("Refusing LIVE mode with LLM_PROVIDER=freellmapi: free tiers switch models and run out "
+                 "of quota mid-day, so entries would be judged inconsistently or blocked. Use it in dry "
+                 "run to compare, or set GATE_ALLOW_FREE_LLM_LIVE=1 if you accept that.")
+    print(f"Reviewer: {grok_client.describe()}")
     print(f"Grok gate on {host}:{port}  mode={cfg['mode']} min_conf={cfg['min_conf']} "
           f"on_error={cfg['on_error']}  {'LIVE - approved alerts WILL trade' if cfg['live'] else 'DRY RUN'}")
     print("Webhook path: /tv/<GATE_TOKEN>   health: /health")

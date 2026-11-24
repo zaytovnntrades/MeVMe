@@ -8,6 +8,36 @@ Python standard library only. Nothing to install.
 | `grok_gate.py` | Webhook relay: Grok reviews TradingView **entries** before they reach StrategyFactory |
 | `test_grok_gate.py` | Offline tests with a fake Grok and a fake StrategyFactory: `python3 -m unittest test_grok_gate -v` |
 
+## Switching provider: Grok or FreeLLMAPI
+
+The client and the gate both read the same settings.
+
+| Setting | xAI Grok (default) | FreeLLMAPI (free tiers) |
+|---|---|---|
+| `LLM_PROVIDER` | `xai` | `freellmapi` |
+| Base URL | `https://api.x.ai/v1` | `http://localhost:3001/v1` |
+| Key variable | `XAI_API_KEY` | `FREELLMAPI_API_KEY` (from the dashboard's Keys page) |
+| Default model | `grok-4.7` (or `XAI_MODEL`) | `auto` (the router picks) |
+
+`LLM_BASE_URL`, `LLM_API_KEY` and `LLM_MODEL` override any of these, for example FreeLLMAPI on another machine or a pinned model.
+
+```bash
+python3 grok_client.py provider                                  # what's active (never prints the key)
+LLM_PROVIDER=freellmapi python3 grok_client.py models
+LLM_PROVIDER=freellmapi LLM_MODEL=gemini-3.6-flash python3 grok_client.py ask "Explain funding rates"
+```
+
+**Side-by-side dry run:** run two gates on different ports and send the same alert to both, then compare the two logs.
+
+```bash
+GATE_PORT=8080 GATE_LOG=grok.jsonl python3 grok_gate.py serve
+LLM_PROVIDER=freellmapi GATE_PORT=8081 GATE_LOG=free.jsonl python3 grok_gate.py serve
+```
+
+- Each decision logs `grok._reviewer.model`: the model that **actually** answered. With `auto`, FreeLLMAPI may use a different model on each request.
+- The gate **refuses `GATE_LIVE=1` with FreeLLMAPI** unless you set `GATE_ALLOW_FREE_LLM_LIVE=1`. Free tiers change models and run out of quota during the day.
+- JSON wrapped in ```` ```json ```` fences or surrounded by extra text is accepted, which free models often produce.
+
 ## How the gate works
 
 ```

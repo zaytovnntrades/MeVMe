@@ -4,6 +4,8 @@
 """
 import json
 import os
+import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -35,6 +37,8 @@ class Fakes:
         self.grok_reply = {"bias": "long", "confidence": 80, "reasons": ["trend"], "invalidation": "x",
                            "risk_note": "y"}
         self.grok_status = 200
+        self.grok_served_model = None
+        self.grok_fenced = False
         self.grok_requests, self.forwarded = [], []
         self.forward_statuses = []  # popped per forward; empty = 200
         fakes = self
@@ -47,7 +51,13 @@ class Fakes:
                 body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
                 if self.path == "/v1/chat/completions":
                     fakes.grok_requests.append((self.headers.get("Authorization"), body))
-                    out = json.dumps({"choices": [{"message": {"content": json.dumps(fakes.grok_reply)}}]})
+                    content = json.dumps(fakes.grok_reply)
+                    if fakes.grok_fenced:
+                        content = "```json\n" + content + "\n```"
+                    resp = {"choices": [{"message": {"content": content}}]}
+                    if fakes.grok_served_model:
+                        resp["model"] = fakes.grok_served_model
+                    out = json.dumps(resp)
                     code = fakes.grok_status
                 else:
                     fakes.forwarded.append((self.path, body))
@@ -60,6 +70,66 @@ class Fakes:
         self.srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
         threading.Thread(target=self.srv.serve_forever, daemon=True).start()
         self.base = f"http://127.0.0.1:{self.srv.server_address[1]}"
+
+
+HERE = Path(__file__).resolve().parent
+
+
+def run_py(code: str, **env) -> subprocess.CompletedProcess:
+    base = {k: v for k, v in os.environ.items()
+            if not k.startswith(("LLM_", "XAI_", "FREELLMAPI_", "GATE_"))}
+    return subprocess.run([sys.executable, "-B", "-c", code], cwd=HERE, env={**base, **env},
+                          capture_output=True, text=True, timeout=20)
+
+
+class ProviderSwitch(unittest.TestCase):
+    SHOW = "import grok_client as g; print(g.PROVIDER, g.BASE_URL, g.KEY_ENV, g.DEFAULT_MODEL)"
+
+    def test_default_is_xai(self):
+        self.assertEqual(run_py(self.SHOW).stdout.split(),
+                         ["xai", "https://api.x.ai/v1", "XAI_API_KEY", "grok-4.7"])
+
+    def test_freellmapi_preset(self):
+        self.assertEqual(run_py(self.SHOW, LLM_PROVIDER="freellmapi").stdout.split(),
+                         ["freellmapi", "http://localhost:3001/v1", "FREELLMAPI_API_KEY", "auto"])
+
+    def test_overrides_win(self):
+        out = run_py(self.SHOW, LLM_PROVIDER="freellmapi", LLM_BASE_URL="http://10.0.0.5:3001/v1/",
+                     LLM_API_KEY="k", LLM_MODEL="gemini-3.6-flash").stdout.split()
+        self.assertEqual(out, ["freellmapi", "http://10.0.0.5:3001/v1", "LLM_API_KEY", "gemini-3.6-flash"])
+
+    def test_xai_model_still_honoured(self):
+        self.assertEqual(run_py(self.SHOW, XAI_MODEL="grok-5").stdout.split()[-1], "grok-5")
+
+    def test_unknown_provider_rejected(self):
+        r = run_py(self.SHOW, LLM_PROVIDER="openai")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("LLM_PROVIDER must be one of", r.stderr)
+
+    def test_missing_key_message_names_right_variable(self):
+        r = run_py("import grok_client as g; g._key()", LLM_PROVIDER="freellmapi")
+        self.assertIn("FREELLMAPI_API_KEY", r.stderr)
+
+    def test_provider_command_never_prints_key(self):
+        r = subprocess.run([sys.executable, "-B", "grok_client.py", "provider"], cwd=HERE,
+                           env={**os.environ, "LLM_PROVIDER": "xai", "XAI_API_KEY": "xai-supersecret"},
+                           capture_output=True, text=True, timeout=20)
+        self.assertIn("XAI_API_KEY (set)", r.stdout)
+        self.assertNotIn("supersecret", r.stdout)
+
+    def test_live_gate_refused_on_free_tier(self):
+        r = run_py("import grok_gate; grok_gate.serve()", LLM_PROVIDER="freellmapi",
+                   FREELLMAPI_API_KEY="k", GATE_TOKEN=TOKEN, GATE_LIVE="1")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("Refusing LIVE mode", r.stderr)
+
+    def test_parse_json_reply_tolerates_fences(self):
+        p = grok_client.parse_json_reply
+        self.assertEqual(p('{"bias":"long"}'), {"bias": "long"})
+        self.assertEqual(p('```json\n{"bias":"short","confidence":80}\n```'), {"bias": "short", "confidence": 80})
+        self.assertEqual(p('Sure! {"bias":"neutral"} Hope that helps.'), {"bias": "neutral"})
+        with self.assertRaises(ValueError):
+            p("no json here")
 
 
 class LogicTests(unittest.TestCase):
@@ -269,6 +339,15 @@ class EndToEnd(unittest.TestCase):
         self.post(f"{gate}/tv/{TOKEN}", LONG)
         self.logs(1)
         self.assertNotIn(TOKEN, json.dumps(self.fakes.forwarded))
+
+    def test_router_served_model_and_fenced_reply_logged(self):
+        self.fakes.grok_served_model = "groq/llama-4-scout"
+        self.fakes.grok_fenced = True
+        gate = self.start_gate(CFG)
+        self.post(f"{gate}/tv/{TOKEN}", LONG)
+        log = self.logs(1)[0]
+        self.assertTrue(log["approved"])
+        self.assertEqual(log["grok"]["_reviewer"]["model"], "groq/llama-4-scout")
 
     def test_log_never_contains_credentials(self):
         gate = self.start_gate(CFG)

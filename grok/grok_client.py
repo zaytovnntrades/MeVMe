@@ -15,6 +15,14 @@ Usage:
                                                         # structured JSON trade read
 
 The xAI API is OpenAI-compatible: base URL https://api.x.ai/v1, Bearer auth.
+
+Switching provider (any OpenAI-compatible endpoint works):
+    LLM_PROVIDER=xai          (default)  https://api.x.ai/v1      key: XAI_API_KEY         model: grok-4.7
+    LLM_PROVIDER=freellmapi              http://localhost:3001/v1 key: FREELLMAPI_API_KEY  model: auto
+    LLM_BASE_URL / LLM_API_KEY / LLM_MODEL override any preset field, e.g. a FreeLLMAPI on another host.
+    XAI_MODEL is still honoured for the xai preset.
+
+    python3 grok_client.py provider       # show what is active (never prints the key)
 """
 import argparse
 import json
@@ -23,15 +31,32 @@ import sys
 import urllib.error
 import urllib.request
 
-BASE_URL = "https://api.x.ai/v1"
-DEFAULT_MODEL = os.environ.get("XAI_MODEL", "grok-4.7")  # run `models` to see current names
+PRESETS = {
+    "xai": {"base_url": "https://api.x.ai/v1", "key_env": "XAI_API_KEY",
+            "model": os.environ.get("XAI_MODEL", "grok-4.7"), "hint": "xai-..."},
+    "freellmapi": {"base_url": "http://localhost:3001/v1", "key_env": "FREELLMAPI_API_KEY",
+                   "model": "auto", "hint": "freellmapi-... (Keys page header in the dashboard)"},
+}
+PROVIDER = os.environ.get("LLM_PROVIDER", "xai").lower()
+if PROVIDER not in PRESETS:
+    sys.exit(f"LLM_PROVIDER must be one of {', '.join(PRESETS)}, got '{PROVIDER}'.")
+_PRESET = PRESETS[PROVIDER]
+BASE_URL = os.environ.get("LLM_BASE_URL", _PRESET["base_url"]).rstrip("/")
+KEY_ENV = "LLM_API_KEY" if os.environ.get("LLM_API_KEY") else _PRESET["key_env"]
+DEFAULT_MODEL = os.environ.get("LLM_MODEL", _PRESET["model"])  # run `models` to see current names
+IS_FREE_TIER = PROVIDER == "freellmapi"
 
 
 def _key() -> str:
-    key = os.environ.get("XAI_API_KEY")
+    key = os.environ.get(KEY_ENV)
     if not key:
-        sys.exit("Set XAI_API_KEY first:  export XAI_API_KEY='xai-...'")
+        sys.exit(f"Set {KEY_ENV} first:  export {KEY_ENV}='{_PRESET['hint']}'")
     return key
+
+
+def describe() -> str:
+    return (f"provider={PROVIDER} base_url={BASE_URL} model={DEFAULT_MODEL} "
+            f"key={KEY_ENV} ({'set' if os.environ.get(KEY_ENV) else 'MISSING'})")
 
 
 def _request(method: str, path: str, body: dict | None = None, stream: bool = False,
@@ -60,13 +85,30 @@ def list_models() -> list[str]:
     return [m["id"] for m in _request("GET", "/models")["data"]]
 
 
-def chat(messages: list[dict], model: str = DEFAULT_MODEL, temperature: float = 0.3,
-         json_mode: bool = False, timeout: float = 120) -> str:
+def chat_raw(messages: list[dict], model: str = DEFAULT_MODEL, temperature: float = 0.3,
+             json_mode: bool = False, timeout: float = 120) -> dict:
+    """Full response. `data["model"]` is the model that actually answered (matters with routers)."""
     body = {"model": model, "messages": messages, "temperature": temperature}
     if json_mode:
         body["response_format"] = {"type": "json_object"}
-    data = _request("POST", "/chat/completions", body, timeout=timeout)
+    return _request("POST", "/chat/completions", body, timeout=timeout)
+
+
+def chat(messages: list[dict], model: str = DEFAULT_MODEL, temperature: float = 0.3,
+         json_mode: bool = False, timeout: float = 120) -> str:
+    data = chat_raw(messages, model, temperature, json_mode, timeout)
     return data["choices"][0]["message"]["content"]
+
+
+def parse_json_reply(text: str) -> dict:
+    """Parse a JSON reply, tolerating ```json fences or prose around it (common on free models)."""
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        start, end = text.find("{"), text.rfind("}")
+        if start == -1 or end <= start:
+            raise ValueError(f"no JSON object in reply: {text[:120]!r}")
+        return json.loads(text[start:end + 1])
 
 
 def chat_stream(messages: list[dict], model: str = DEFAULT_MODEL) -> str:
@@ -115,7 +157,7 @@ def trade_signal(symbol: str, price: str, notes: str, model: str = DEFAULT_MODEL
          {"role": "user", "content": f"Symbol: {symbol}\nPrice: {price}\nNotes: {notes}"}],
         model=model, temperature=0.2, json_mode=True,
     )
-    return json.loads(out)
+    return parse_json_reply(out)
 
 
 def main() -> None:
@@ -123,6 +165,7 @@ def main() -> None:
     p.add_argument("--model", default=DEFAULT_MODEL)
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("models")
+    sub.add_parser("provider", help="show the active provider, URL, model and key variable")
     a = sub.add_parser("ask")
     a.add_argument("prompt")
     a.add_argument("--stream", action="store_true")
@@ -134,7 +177,9 @@ def main() -> None:
     s.add_argument("notes")
     args = p.parse_args()
 
-    if args.cmd == "models":
+    if args.cmd == "provider":
+        print(describe())
+    elif args.cmd == "models":
         print("\n".join(list_models()))
     elif args.cmd == "ask":
         msgs = [{"role": "user", "content": args.prompt}]
