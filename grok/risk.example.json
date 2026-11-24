@@ -1,0 +1,33 @@
+{
+  "_comment": "Copy to risk.json and edit. Remove a key or set it to null to turn a rule off. Day = UTC day. These numbers fit together: $100 margin x 10x = $1,000 position; a 2% stop on it risks $20 (2% of a $1,000 account); $60/day = three losing trades. Futures: 1 MNQ x 10-pt stop x $2/pt = $20 risk; 1 MES x 4-pt stop x $5/pt = $20. NQ ($20/pt) is left off allowed_symbols on purpose: one NQ contract with a 10-pt stop risks $200. min_reward_risk 2 = every take-profit at least 2x the stop distance (1:2); break-even win rate 33%.",
+  "account_usdt": 1000,
+  "blocked_symbols": [],
+  "allowed_symbols": [
+    "BTCUSDT",
+    "ETHUSDT",
+    "SOLUSDT",
+    "MNQ",
+    "MES"
+  ],
+  "max_leverage": 10,
+  "max_margin_usdt": 100,
+  "max_notional_usdt": 1000,
+  "max_wallet_pct": 10,
+  "require_stop_loss": true,
+  "max_stop_loss_pct": 2,
+  "max_risk_usdt": 20,
+  "max_entries_per_day": 6,
+  "max_entries_per_symbol_per_day": 2,
+  "max_daily_risk_usdt": 60,
+  "max_contracts": {
+    "MNQ": 2,
+    "MES": 2
+  },
+  "max_stop_points": {
+    "MNQ": 15,
+    "MES": 6
+  },
+  "futures_session": true,
+  "no_entry_minutes_before_close": 15,
+  "min_reward_risk": 2
+}

@@ -6,7 +6,10 @@ Python standard library only. Nothing to install.
 |---|---|
 | `grok_client.py` | Talks to the Grok (xAI) API: `models`, `ask`, `respond`, `signal` |
 | `grok_gate.py` | Webhook relay: Grok reviews TradingView **entries** before they reach StrategyFactory |
-| `test_grok_gate.py` | Offline tests with a fake Grok and a fake StrategyFactory: `python3 -m unittest test_grok_gate -v` |
+| `risk.py` | Risk limits checked in code before Grok: leverage, size, stop-loss, per-trade and daily risk, symbol lists, kill switch |
+| `futures.py` | Nasdaq and other CME index futures through TradersPost: contract specs, contract-based risk, CME hours, reversal safety |
+| `risk.example.json` | Starter limits for a $1,000 account. Copy it to `risk.json` |
+| `test_grok_gate.py`, `test_risk.py`, `test_futures.py` | Offline tests (117): `python3 -m unittest test_grok_gate test_risk test_futures -v` |
 
 ## Switching provider: Grok or FreeLLMAPI
 
@@ -57,6 +60,157 @@ TradingView alert ──► grok_gate  /tv/<GATE_TOKEN>
 - **Dry run by default.** Nothing trades until you start it with `GATE_LIVE=1`.
 - `gate_notes` is read by Grok and stripped before forwarding, so StrategyFactory receives exactly what the builder generated.
 - Every decision goes to `gate_log.jsonl`. Credentials are never logged.
+
+## Futures (Nasdaq and other CME index futures)
+
+One gate handles both markets. **The JSON shape decides the route:**
+
+| Alert looks like | Market | Sent to |
+|---|---|---|
+| `{"exchange": "bybit", "coin_pair": ..., "position": ...}` | Crypto perpetuals | StrategyFactory |
+| `{"ticker": ..., "action": ..., "sentiment": ...}` | Futures | TradersPost, which reaches Tradovate, NinjaTrader, TradeStation, IBKR and others |
+
+```bash
+export TRADERSPOST_WEBHOOK_URL="https://webhooks.traderspost.io/trading/webhook/..."   # from your TradersPost strategy; it's a secret
+```
+
+**TradingView alert message** for a strategy. Point the alert at the gate's URL, not at TradersPost:
+
+```json
+{
+  "ticker": "{{ticker}}",
+  "action": "{{strategy.order.action}}",
+  "sentiment": "{{strategy.market_position}}",
+  "prev_market_position": "{{strategy.prev_market_position}}",
+  "quantity": "{{strategy.order.contracts}}",
+  "price": "{{close}}",
+  "time": "{{timenow}}",
+  "stopLoss": {"type": "stop", "stopPrice": "{{plot(\"SL\")}}"},
+  "takeProfit": {"limitPrice": "{{plot(\"TP\")}}"},
+  "gate_notes": "RSI {{plot(\"RSI\")}}, VWAP {{plot(\"VWAP\")}}"
+}
+```
+
+The `{{plot("SL")}}` placeholder needs a plot named `SL` in your Pine script, and the same goes for the `gate_notes` plots. Check every field against TradersPost's own docs before going live: the gate forwards this JSON exactly as sent, minus `gate_notes`.
+
+**How the gate reads a futures alert:**
+- **Exits are never blocked:**
+  - `action` is `exit` or `cancel`
+  - `sentiment` is `flat`
+  - a buy or sell against the current sentiment, like `sell` + `long`, which trims a long
+  - anything it doesn't recognise
+- **Entries:** `buy` + `long` and `sell` + `short`. These go through the same chain as crypto: kill switch, duplicate check, precheck, risk limits, daily ledger, then Grok.
+- **Reversal safety:** a blocked entry that was a reversal, where `prev_market_position` is the opposite side, sends `{"ticker": ..., "action": "exit"}` to close the old position. A veto then means "flat", never "stuck in the trade the strategy wanted out of". Without `prev_market_position` the gate can't tell, so keep that field in the alert.
+
+**Contract specs built in** (dollars per 1.00 point): NQ $20, MNQ $2, ES $50, MES $5, YM $5, MYM $0.50, RTY $50, M2K $5. Add others with `futures_point_values`, for example `{"CL": 1000}`. **Trade risk = contracts × stop points × $/point.** A 20-point stop costs $40 on 1 MNQ and $400 on 1 NQ.
+
+**Futures limits in `risk.json`** (a number covers every contract; a dict sets one per contract):
+
+| Key | Blocks an entry when |
+|---|---|
+| `max_contracts` | more contracts, for example `{"MNQ": 2, "MES": 2}` |
+| `max_stop_points` | the stop is wider in points, for example `{"MNQ": 15, "MES": 6}` |
+| `futures_session` | outside CME hours: Sunday 18:00 to Friday 17:00 ET, with a 17:00–18:00 break each day |
+| `no_entry_minutes_before_close` | it's within N minutes of the 17:00 ET close |
+| `futures_point_values` | not a rule: $/point for contracts not built in |
+
+These rules apply to **both markets**: `allowed_symbols` and `blocked_symbols` (use roots like `MNQ`), `require_stop_loss`, `max_risk_usdt` (read as USD), the daily counts and `max_daily_risk_usdt`. **The daily risk budget is shared**, so a crypto loss and a futures loss come out of the same pot. The crypto-only rules (`max_leverage`, `max_margin_usdt`, `max_notional_usdt`, `max_wallet_pct`, `max_stop_loss_pct`) never touch futures. One MNQ contract is worth about $40k notional, which would trip any crypto-sized cap.
+
+**When the gate refuses to guess, it blocks the entry instead:**
+- `stopLoss.amount` (its exact meaning isn't verified here). Use `stopPrice`, or `percent` with `price`.
+- A `quantityType` other than a fixed contract count.
+- No `quantity`, which means TradersPost sizes the order itself.
+- A contract with no known point value.
+
+**Not handled:** CME holidays and early closes. Check the CME calendar or `touch HALT` on those days.
+
+**Known gap on crypto:** a vetoed crypto reversal (`exit_existing_trade:"1"`) leaves the old position open, because StrategyFactory alerts don't carry the previous position. Send separate `close_long` / `close_short` alerts, which the builder makes and the gate never blocks.
+
+## 1:2 reward-to-risk
+
+`"min_reward_risk": 2` in `risk.json` blocks any entry whose take-profit isn't at least **twice as far as its stop**. It's on in `risk.example.json`.
+
+| Alert | How the ratio is measured | 1:2 example |
+|---|---|---|
+| Crypto, percent TP/SL (builder default) | TP % ÷ SL % | `--tp 4 --sl 2` |
+| Crypto, multi-TP | **size-weighted average** of the legs ÷ SL %. `40@2,30@4,30@6` with `--sl 2` is only **1:1.9**, so it's blocked. | `--multi-tp 40@3,30@4,30@6 --sl 2` = 1:2.1 |
+| Crypto, absolute prices | needs `signal_price` (`--include-signal-meta`) | entry 100,000, SL 99,000, TP 102,000 |
+| Futures (TradersPost) | `takeProfit.limitPrice` (or `percent`) distance ÷ stop distance, in points | MNQ entry 21,000, SL 20,990, TP 21,020 |
+
+**Always blocked**, with or without the rule:
+- a stop or target **on the wrong side of entry**, such as a stop above the price on a long
+
+**Blocked when the rule is on:**
+- no take-profit, no stop-loss, or a distance that can't be measured, such as `takeProfit.amount`
+
+**Why 1:2:** at 1:2 you break even winning just **33%** of trades, before fees and slippage. At 1:1 you need 50%. Fees and slippage cost more on tight futures stops, so check what your actual fills give you.
+
+**Build 1:2 into the strategy** so the gate never has to block it. This Pine v6 snippet sends TradersPost-format alerts with the stop and target already set at 2× the stop distance, rounded to the tick:
+
+```pine
+rr      = input.float(2.0, "Reward:risk (2 = 1:2)")
+stopPts = input.float(10, "Stop distance (points)")
+
+entryMsg(action, sentiment, sl, tp) =>
+    '{"ticker":"' + syminfo.ticker + '","action":"' + action + '","sentiment":"' + sentiment +
+     '","prev_market_position":"{{strategy.prev_market_position}}","quantity":1,"price":' + str.tostring(close) +
+     ',"time":"{{timenow}}","stopLoss":{"type":"stop","stopPrice":' + str.tostring(sl) +
+     '},"takeProfit":{"limitPrice":' + str.tostring(tp) + '}}'
+exitMsg = '{"ticker":"' + syminfo.ticker + '","action":"exit"}'
+
+longSL  = math.round_to_mintick(close - stopPts),  longTP  = math.round_to_mintick(close + stopPts * rr)
+shortSL = math.round_to_mintick(close + stopPts),  shortTP = math.round_to_mintick(close - stopPts * rr)
+
+if longSignal
+    strategy.entry("L", strategy.long, alert_message = entryMsg("buy", "long", longSL, longTP))
+    strategy.exit("LX", "L", stop = longSL, limit = longTP, alert_message = exitMsg)
+if shortSignal
+    strategy.entry("S", strategy.short, alert_message = entryMsg("sell", "short", shortSL, shortTP))
+    strategy.exit("SX", "S", stop = shortSL, limit = shortTP, alert_message = exitMsg)
+```
+
+Create one alert on the strategy with the message `{{strategy.order.alert_message}}` and the gate's webhook URL. `longSignal` and `shortSignal` are your own entry conditions.
+
+## Risk limits (ported from trader-risk)
+
+Every new entry passes these checks **before** Grok is asked, so a blocked trade costs no API call. Exits skip all of them, so you can always get out of a position.
+
+```
+entry ─► kill switch ─► duplicate ─► precheck ─► risk limits ─► daily ledger ─► Grok ─► send
+exit  ─────────────────────────────────────────────────────────────────────────────────► send (retried)
+```
+
+```bash
+cp risk.example.json risk.json     # then edit the numbers for your account
+touch HALT                          # kill switch: block every new entry right now
+rm HALT                             # resume
+```
+
+| Key | Blocks an entry when |
+|---|---|
+| `blocked_symbols` / `allowed_symbols` | the symbol is blocked, or not on the allowed list (`BTCUSDT.P` and `BYBIT:BTCUSDT` both count as `BTCUSDT`) |
+| `max_leverage` | leverage is higher |
+| `max_margin_usdt` | margin committed is higher |
+| `max_notional_usdt` | position size (margin × leverage) is higher. **This is your real exposure.** |
+| `max_wallet_pct` | a %-of-wallet order is bigger |
+| `require_stop_loss` | there's no stop-loss (`--sl` in the builder) |
+| `max_stop_loss_pct` | the stop is wider than this % from entry |
+| `max_risk_usdt` | the loss if the stop is hit (position size × stop %) is higher |
+| `min_reward_risk` | the take-profit is less than this many times the stop distance. **`2` = 1:2.** Applies to crypto and futures. |
+| `max_entries_per_day` / `max_entries_per_symbol_per_day` | today's count (UTC) is used up |
+| `max_daily_risk_usdt` | today's stop-loss risk plus this trade's would go over the cap |
+| `account_usdt` | not a rule: lets the gate value %-of-wallet orders in USDT |
+
+- **Every failing rule is listed**, not just the first, so one read gives you the whole fix-list. The details are in each log line under `risk`.
+- **An order the gate can't value is blocked, not waved through.** A %-of-wallet order needs `account_usdt`, and a base-quantity order needs `signal_price`. The builder's `--include-signal-meta` sends `signal_price`.
+- **A typo in `risk.json` stops the gate from starting**, so a misspelled key can't silently turn a rule off. A missing `risk.json` means no limits. Live mode then warns at start-up.
+- **The daily ledger** is `gate_ledger.json`, or `gate_ledger.dry.json` in dry run so practice runs don't use up your live budget. It survives restarts and resets at UTC midnight.
+  - Budget is **reserved before Grok is asked**, so two alerts arriving together can't both squeeze under a cap.
+  - It's **released if Grok vetoes** the trade or StrategyFactory refuses it with a 4xx.
+  - A timeout or 5xx **still counts**, because the order may have filled.
+- **What the gate can't see:** your balance, open positions and profit or loss live on the exchange. `max_daily_risk_usdt` therefore caps the worst-case loss you *commit to* each day, not your actual losses. Keep a daily loss limit on the exchange too, if it offers one.
+
+**Rule of thumb from the example:** risk about 2% of the account per trade and about 6% per day. On $1,000, that's $100 margin at 10x with a 2% stop, which risks $20, and a $60 daily cap, which allows three losing trades.
 
 ## Setup, step by step
 

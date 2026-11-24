@@ -1,0 +1,7 @@
+gate_log.jsonl
+gate_ledger.json
+gate_ledger.dry.json
+*.tmp
+HALT
+risk.json
+__pycache__/
